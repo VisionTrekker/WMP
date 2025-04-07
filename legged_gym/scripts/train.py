@@ -46,15 +46,18 @@ from legged_gym.utils import get_args, task_registry
 import torch
 
 def train(args):
+    # AliengoAMPCfg、AliengoAMPCfgPPO
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
 
     train_cfg.runner.run_name = 'WMP'
 
     train_cfg.runner.max_iterations = 100000
     train_cfg.runner.save_interval = 1000
-
+    # 创建环境
     env, env_cfg = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    # 创建训练器
     ppo_runner, train_cfg = task_registry.make_wmp_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
+    # 执行训练
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 
 

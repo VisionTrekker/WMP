@@ -80,49 +80,66 @@ class LeggedRobot(BaseTask):
         """
         self.cfg = cfg
 
-        # get terrain type idx
+        # 各地形的 起止索引
+        # 0 ~ 0% 的机器人在 wave
         self.wave_start_idx = 0
         self.wave_end_idx = math.ceil(self.cfg.env.num_envs * sum(self.cfg.terrain.terrain_proportions[:1]))
+        # 0 ~ 5% (5%) 的机器人在 rough slope
         self.slope_start_idx = self.wave_end_idx
         self.slope_end_idx = math.ceil(self.cfg.env.num_envs * sum(self.cfg.terrain.terrain_proportions[:2]))
+        # 5 ~ 20% (15%) 的机器人在 stairs up
         self.stairup_start_idx = self.slope_end_idx
         self.stairup_end_idx = math.ceil(self.cfg.env.num_envs * sum(self.cfg.terrain.terrain_proportions[:3]))
+        # 20 ~ 35% (15%) 的机器人在 stairs down
         self.stairdown_start_idx = self.stairup_end_idx
         self.stairdown_end_idx = math.ceil(self.cfg.env.num_envs * sum(self.cfg.terrain.terrain_proportions[:4]))
+        # 35 ~ 35% 的机器人在 discrete
         self.discrete_start_idx = self.stairdown_end_idx
         self.discrete_end_idx = math.ceil(self.cfg.env.num_envs * sum(self.cfg.terrain.terrain_proportions[:5]))
+        # 35 ~ 60% (25%) 的机器人在 gap
         self.gap_start_idx = self.discrete_end_idx
         self.gap_end_idx = math.ceil(self.cfg.env.num_envs * sum(self.cfg.terrain.terrain_proportions[:6]))
+        # 60 ~ 85% (25%) 的机器人在 pit
         self.pit_start_idx = self.gap_end_idx
         self.pit_end_idx = math.ceil(self.cfg.env.num_envs * sum(self.cfg.terrain.terrain_proportions[:7]))
+        # 85 ~ 90% (5%) 的机器人在 tilt
         self.tilt_start_idx = self.pit_end_idx
         self.tilt_end_idx = math.ceil(self.cfg.env.num_envs * sum(self.cfg.terrain.terrain_proportions[:8]))
+        # 90 ~ 95% (5%) 的机器人在 crawl
         self.crawl_start_idx = self.tilt_end_idx
         self.crawl_end_idx = math.ceil(self.cfg.env.num_envs * sum(self.cfg.terrain.terrain_proportions[:9]))
+        # 95 ~ 100% (5%) 的机器人在 rough flat
         self.roughflat_start_idx = self.crawl_end_idx
         self.roughflat_end_idx = self.cfg.env.num_envs
 
-        self.sim_params = sim_params
+        self.sim_params = sim_params    # 物理仿真参数
         self.height_samples = None
         # for debug
         self.debug_viz = True
         self.lookat_id = 8
+
         self.init_done = False
+        # 初始化RL训练中每个episode的总步数、域随机化触发步数间隔、观测项的缩放、奖励项的缩放、控制指令的范围
         self._parse_cfg(self.cfg)
+        # 调用父类 BaseTask 的初始化，创建：Isaac Gym仿真实例、地形网格、并行环境空间
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
 
+        # 深度图像缩放
         self.resize_transform = torchvision.transforms.Resize((self.cfg.depth.resized[0], self.cfg.depth.resized[1]),
                                                               interpolation=torchvision.transforms.InterpolationMode.BICUBIC)
 
-        if not self.headless:
+        if not self.headless:   # 设置观察视角
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
+
+        # 创建存储状态/观测/动作的张量
         self._init_buffers()
+        # 初始化奖励函数
         self._prepare_reward_function()
         self.init_done = True
 
-        self.global_counter = 0
-        self.total_env_steps_counter = 0
-
+        self.global_counter = 0  # 全局步数计数器
+        self.total_env_steps_counter = 0  # 总环境步数
+        # 动作延迟范围(用于domain randomization)
         self.latency_range = [int((self.cfg.domain_rand.latency_range[0] + 1e-8) / self.sim_params.dt),
                                  int((self.cfg.domain_rand.latency_range[1] - 1e-8) / self.sim_params.dt) + 1]
 
@@ -1304,15 +1321,18 @@ class LeggedRobot(BaseTask):
             self.env_origins[:, 2] = 0.
 
     def _parse_cfg(self, cfg):
-        self.dt = self.cfg.control.decimation * self.sim_params.dt
-        self.obs_scales = self.cfg.normalization.obs_scales
-        self.reward_scales = class_to_dict(self.cfg.rewards.scales)
-        self.command_ranges = class_to_dict(self.cfg.commands.ranges)
+        self.dt = self.cfg.control.decimation * self.sim_params.dt  # 单个控制的 仿真时间（s）= 控制解算器间隔（步） * 物理仿真步长（s/步） = 0.008 s
+        self.obs_scales = self.cfg.normalization.obs_scales # 各观测值的 缩放系数
+        self.reward_scales = class_to_dict(self.cfg.rewards.scales) # 各奖励项的 缩放系数
+        self.command_ranges = class_to_dict(self.cfg.commands.ranges)   # 各控制指令的 范围
+        # 非网格地形，则禁用 课程学习
         if self.cfg.terrain.mesh_type not in ['heightfield', 'trimesh']:
             self.cfg.terrain.curriculum = False
-        self.max_episode_length_s = self.cfg.env.episode_length_s
-        self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)
 
+        self.max_episode_length_s = self.cfg.env.episode_length_s   # RL训练中每个episode 的最大持续时间（s）
+        # RL训练中每个episode 的 最大仿真步数 = 20 * 125 = 2500 步
+        self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)
+        # 域随机化的 触发步数间隔 = 15 * 125 = 1875 步
         self.cfg.domain_rand.push_interval = np.ceil(self.cfg.domain_rand.push_interval_s / self.dt)
 
     def _draw_debug_vis(self):

@@ -85,7 +85,7 @@ class TaskRegistry():
             args = get_args()
         # check if there is a registered env with that name
         if name in self.task_classes:
-            task_class = self.get_task_class(name)
+            task_class = self.get_task_class(name)  # LeggedRobot
         else:
             raise ValueError(f"Task with name: {name} was not registered")
         if env_cfg is None:
@@ -94,9 +94,10 @@ class TaskRegistry():
         # override cfg from args (if specified)
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
         set_seed(env_cfg.seed)
-        # parse sim params (convert to dict first)
+        # 物理引擎参数解析 parse sim params (convert to dict first)
         sim_params = {"sim": class_to_dict(env_cfg.sim)}
         sim_params = parse_sim_params(args, sim_params)
+        # 初始化一个环境 LeggedRobot（在 env/base/legged_robot.py 内）
         env = task_class(   cfg=env_cfg,
                             sim_params=sim_params,
                             physics_engine=args.physics_engine,

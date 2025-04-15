@@ -384,7 +384,10 @@ class WMPRunner:
 
             # copy the config file
             if(it == 0):
-                os.system("cp ./legged_gym/envs/a1/a1_amp_config.py " + self.log_dir + "/")
+                robot_name = self.cfg["experiment_name"].split("_")[0]
+                file_name = self.cfg["experiment_name"].split("_")[0] + "_" + self.cfg["experiment_name"].split("_")[1]
+                print(f"------ cp ./legged_gym/envs/{robot_name}/{file_name}_config.py ------")
+                os.system(f"cp ./legged_gym/envs/{robot_name}/{file_name}_config.py " + self.log_dir + "/")
 
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))

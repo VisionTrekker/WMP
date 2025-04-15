@@ -68,28 +68,32 @@ class WMPRunner:
                  history_length=5,
                  ):
 
-        self.cfg = train_cfg["runner"]
+        self.cfg = train_cfg["runner"]  # runner 相关的配置
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
         self.depth_predictor_cfg = train_cfg["depth_predictor"]
         self.device = device
         self.env = env
         self.history_length = history_length
+
+        # 1. 计算 critic - actor 的 观测维度
         if self.env.num_privileged_obs is not None:
+            # 默认，critic 的 观测维度 = 特权观测维度，共285维 (53 + 33 + 12 + 187)，前 53 维是特权信息（包含3维base的线速度），中间 45 维是本体感知，后 187 维是特权观测中的 heightmap
             num_critic_obs = self.env.num_privileged_obs
         else:
             num_critic_obs = self.env.num_obs
+
         if self.env.include_history_steps is not None:
             num_actor_obs = self.env.num_obs * self.env.include_history_steps
-        else:
+        else:   # 默认，actor 的 观测维度 =
             num_actor_obs = self.env.num_obs
 
 
 
-        # build world model
+        # 2. 创建 世界模型
         self._build_world_model()
 
-        # build depth predictor
+        # 3. 创建 深度预测器
         self.depth_predictor = DepthPredictor().to(self._world_model.device)
         self.depth_predictor_opt = optim.Adam(self.depth_predictor.parameters(), lr=self.depth_predictor_cfg["lr"],
                                               weight_decay=self.depth_predictor_cfg["weight_decay"])
@@ -140,8 +144,9 @@ class WMPRunner:
 
 
     def _build_world_model(self):
-        # world model
+        """ 创建世界模型 """
         print('Begin construct world model')
+        # 从 dreamer/configs.yaml 读取 网络模型配置
         configs = yaml.safe_load(
             (pathlib.Path(sys.argv[0]).parent.parent.parent / "dreamer/configs.yaml").read_text()
         )
@@ -153,10 +158,12 @@ class WMPRunner:
                 else:
                     base[key] = value
 
+        # 2. 加载 configs.yaml 中的 defaults 配置到 dict 中
         name_list = ["defaults"]
         defaults = {}
         for name in name_list:
             recursive_update(defaults, configs[name])
+        # 再解析为 parser args
         parser = argparse.ArgumentParser()
         parser.add_argument("--headless", action="store_true", default=False)
         parser.add_argument("--sim_device", default='cuda:0')
@@ -166,7 +173,8 @@ class WMPRunner:
             arg_type = tools.args_type(value)
             parser.add_argument(f"--{key}", type=arg_type, default=arg_type(value))
         self.wm_config = parser.parse_args()
-        # allow world model and rl env on different device
+
+        # 允许 世界模型 和 RL env 在不同的 device 上
         if (self.wm_config.wm_device != 'None'):
             self.wm_config.device = self.wm_config.wm_device
         self.wm_config.num_actions = self.wm_config.num_actions * self.env.cfg.depth.update_interval

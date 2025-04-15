@@ -80,24 +80,29 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
 
 def parse_sim_params(args, cfg):
-    # code from Isaac Gym Preview 2
-    # initialize sim params
+    """
+        args: 使用 args 中的 num_envs 更新后的 env_cfg
+        cfg:  env_cfg 中包含的 sim 相关配置 的字典
+    """
+    # 初始化仿真器 Isaac Gym 的 模拟参数对象
     sim_params = gymapi.SimParams()
 
-    # set some values from args
+    # 根据args中的物理引擎类型设置不同参数
     if args.physics_engine == gymapi.SIM_FLEX:
         if args.device != "cpu":
             print("WARNING: Using Flex with GPU instead of PHYSX!")
     elif args.physics_engine == gymapi.SIM_PHYSX:
+        # 设置PhysX物理引擎的 GPU使用 和 子场景数量
         sim_params.physx.use_gpu = args.use_gpu
         sim_params.physx.num_subscenes = args.subscenes
+
+    # 设置是否使用GPU流水线
     sim_params.use_gpu_pipeline = args.use_gpu_pipeline
 
-    # if sim options are provided in cfg, parse them and update/override above:
-    if "sim" in cfg:
+    if "sim" in cfg:    # config中包含sim的相关参数，则解析并覆盖初始参数
         gymutil.parse_sim_config(cfg["sim"], sim_params)
 
-    # Override num_threads if passed on the command line
+    # 如果命令行指定了线程数，则覆盖PhysX的线程数设置
     if args.physics_engine == gymapi.SIM_PHYSX and args.num_threads > 0:
         sim_params.physx.num_threads = args.num_threads
 
@@ -117,7 +122,7 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
     else:
         load_run = os.path.join(root, load_run)
 
-    if checkpoint==-1:
+    if checkpoint==-1:  # 加载最新的模型
         models = [file for file in os.listdir(load_run) if 'model' in file]
         models.sort(key=lambda m: '{0:0>15}'.format(m))
         model = models[-1]

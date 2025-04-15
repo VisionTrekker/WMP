@@ -46,22 +46,29 @@ from legged_gym.utils import get_args, task_registry
 import torch
 
 def train(args):
-    # AliengoAMPCfg、AliengoAMPCfgPPO
-    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    # 1. 获取对应机器人的配置参数
+    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task) # AliengoAMPCfg、AliengoAMPCfgPPO
 
     train_cfg.runner.run_name = 'WMP'
 
-    train_cfg.runner.max_iterations = 100000
-    train_cfg.runner.save_interval = 1000
-    # 创建环境
+    train_cfg.runner.max_iterations = 20000
+    train_cfg.runner.save_interval = 500
+    # 2. 创建 env（即 LeggedRobot 对象）
     env, env_cfg = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
-    # 创建训练器
+    # 3. 创建训练器
     ppo_runner, train_cfg = task_registry.make_wmp_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
-    # 执行训练
+    # 4. 执行训练
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 
 
 if __name__ == '__main__':
     args = get_args()
+
+    # args.experiment_name = "aliengo_amp_example"
+    args.run_name = "WMP4"
+    # load:
+    # args.resume = True
+    # args.load_run = "WMP"
+    # args.checkpoint = -1
     args.rl_device = args.sim_device
     train(args)

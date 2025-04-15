@@ -83,9 +83,9 @@ class BaseTask():
         self.reset_buf = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
         self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         self.time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
-        if self.num_privileged_obs is not None:
+        if self.num_privileged_obs is not None: # 特权信息维度不为 None：则先初始化 priviledge_obs_buf（用于非对称训练的 critic obs），后续 step() 会返回数据
             self.privileged_obs_buf = torch.zeros(self.num_envs, self.num_privileged_obs, device=self.device, dtype=torch.float)
-        else: 
+        else:
             self.privileged_obs_buf = None
             # self.num_privileged_obs = self.num_obs
 

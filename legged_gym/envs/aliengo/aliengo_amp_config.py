@@ -41,14 +41,14 @@ MOTION_FILES = glob.glob('datasets/mocap_motions/*')
 class AliengoAMPCfg(LeggedRobotCfg):
     class env(LeggedRobotCfg.env):
         num_envs = 4096
-        include_history_steps = None  # Number of steps of history to include.
+        include_history_steps = None  # 要包含的 历史记录 step 数
         prop_dim = 33 # proprioception
         action_dim = 12
         privileged_dim = 24 + 26 + 3  # privileged_obs[:,:privileged_dim] is the privileged information in privileged_obs, include 3-dim base linear vel
         height_dim = 187  # privileged_obs[:,-height_dim:] is the heightmap in privileged_obs
         forward_height_dim = 525 # for depth image prediction
         num_observations = prop_dim + privileged_dim + height_dim + action_dim
-        num_privileged_obs = prop_dim + privileged_dim + height_dim + action_dim
+        num_privileged_obs = prop_dim + privileged_dim + height_dim + action_dim    # 特权观测维度：共285维 (53 + 33 + 12 + 187)，前53维是特权信息（包含3维base的线速度），中间45维是本体感知，后187维是特权观测中的 heightmap
         reference_state_initialization = False
         reference_state_initialization_prob = 0.85
         amp_motion_files = MOTION_FILES
@@ -130,9 +130,9 @@ class AliengoAMPCfg(LeggedRobotCfg):
         # PD Drive parameters:
         control_type = 'P'
         stiffness = {'joint': 40.}  # [N*m/rad]
-        damping = {'joint': 1.0}  # [N*m*s/rad]
+        damping = {'joint': 2.0}  # [N*m*s/rad]
         # action scale: target angle = actionScale * action + defaultAngle
-        action_scale = 0.5
+        action_scale = 0.5  # Aliengo 还是应设为 0.5
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4  # 控制解算器间隔，每4个sim dt执行一次动作
 
@@ -143,7 +143,7 @@ class AliengoAMPCfg(LeggedRobotCfg):
         camera_terrain_num_rows = 10
         camera_terrain_num_cols = 20
 
-        position = [0.32, 0, 0.03]  # front camera
+        position = [0.35, 0, 0.03]  # front camera
         y_angle = [-5, 5]  # positive pitch down
         z_angle = [0, 0]
         x_angle = [0, 0]
@@ -199,7 +199,7 @@ class AliengoAMPCfg(LeggedRobotCfg):
         randomize_motor_strength = True
         motor_strength_range = [0.8, 1.2]
         randomize_action_latency = True
-        latency_range = [0.00, 0.005]
+        latency_range = [0.00, 0.005]   # 延迟范围，s
 
     class normalization:
         class obs_scales:
@@ -235,31 +235,31 @@ class AliengoAMPCfg(LeggedRobotCfg):
     class rewards(LeggedRobotCfg.rewards):
         reward_curriculum = True
         reward_curriculum_term = ["feet_edge"]
-        reward_curriculum_schedule = [[4000, 10000, 0.1, 1.0]]
+        reward_curriculum_schedule = [[4000, 10000, 0.1, 1.0]]  # [start, end, start_value, end_value]，这里意为逐步增加feet_edge的惩罚权重
 
         soft_dof_pos_limit = 0.9
         base_height_target = 0.25
         foot_height_target = 0.15
-        tracking_sigma = 0.15  # tracking reward = exp(-error^2/sigma)
-        lin_vel_clip = 0.1
+        tracking_sigma = 0.15  # 线速度跟踪奖励 = exp(-线速度误差^2 / sigma)
+        lin_vel_clip = 0.1     # 线速度误差 上下限裁剪阈值，避免过大惩罚
 
         class scales(LeggedRobotCfg.rewards.scales):
             tracking_lin_vel = 1.5
             tracking_ang_vel = 0.5
-            torques = -0.0001
-            dof_acc = -2.5e-7
+            torques = -0.00003  # A1 为 -0.00001, Aliengo 已改为 -0.00003
+            dof_acc = -5e-7     # A1 为 -2.5e-7，Aliengo 可尝试改为 -8e-7
             base_height = -0.
-            feet_air_time = 0.5
+            feet_air_time = 0.7 # A1 为 0.5， Aliengo 可尝试改为 0.7
             collision = -1.0
-            feet_stumble = -0.1
-            action_rate = -0.03
+            feet_stumble = -0.2 # A1 为 -0.1， Aliengo 可尝试改为 -0.2
+            action_rate = -0.05
 
-            feet_edge = -1.0
-            dof_error = -0.04
+            feet_edge = -1.5    # 惩罚 四足在 gap 和 pit 地形的边缘正确落脚，A1 为 -1.0
+            dof_error = -0.05   # 惩罚 关节位置与默认位置的偏差，A1 为 -0.04
 
             lin_vel_z = -1.0
-            cheat = -1
-            stuck = -1
+            cheat = -1    # 惩罚 绕过障碍物的行为
+            stuck = -1.5  # 惩罚 卡住，A1 为 -1， Aliengo 可尝试改为 -1.5
 
 
     class commands:
@@ -314,8 +314,8 @@ class AliengoAMPCfgPPO(LeggedRobotCfgPPO):
         num_mini_batches = 4
 
     class runner(LeggedRobotCfgPPO.runner):
-        run_name = 'flat_push1'
         experiment_name = 'aliengo_amp_example'
+        run_name = 'flat_push1'
         algorithm_class_name = 'AMPPPO'
         policy_class_name = 'ActorCritic'
         max_iterations = 20000  # number of policy updates

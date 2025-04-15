@@ -37,15 +37,15 @@ class LeggedRobotCfg(BaseConfig):
     class env:
         num_envs = 4096
         num_observations = 235
-        privileged_obs = True  # if True, add the privileged information in the obs
+        privileged_obs = True  # True：在 观测中obs 添加 特权信息
         privileged_dim = 24 + 3  # privileged_obs[:,:privileged_dim] is the privileged information in privileged_obs, include 3-dim base linear vel
         height_dim = 187  # privileged_obs[:,-height_dim:] is the heightmap in privileged_obs
-        num_privileged_obs = None # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise 
-        num_actions = 12
-        env_spacing = 3.  # not used with heightfields/trimeshes 
-        send_timeouts = True # send time out information to the algorithm
-        episode_length_s = 20 # episode length in seconds，RL训练中每个episode 的最大持续时间（s）
-        reference_state_initialization = False # initialize state from reference data
+        num_privileged_obs = None # 不为 None：step()则返回 priviledge_obs_buf（用于非对称训练的 critic obs）；为 None： 返回其他
+        num_actions = 12    # 机器人 action 维度，actions 为输出的 四肢的关节角度（按腿的顺序：FL, FR, RL, RR）
+        env_spacing = 3.  # 每个环境的间距（heightfields/trimeshes 地形时不使用）
+        send_timeouts = True # 向算法发送 超时信息
+        episode_length_s = 20 # RL训练中每个 episode 的最大持续时间（s）
+        reference_state_initialization = False # 从 参考数据 初始化状态，则创建 AMPLoader，用于加载 参考运动数据 以模仿学习
 
     class terrain:
         mesh_type = 'trimesh' # "heightfield" # none, plane, heightfield or trimesh
@@ -179,29 +179,29 @@ class LeggedRobotCfg(BaseConfig):
         reward_curriculum_term = ["lin_vel_z"]
         reward_curriculum_schedule = [0, 1000, 1, 0]  #from iter 0 to iter 1000, decrease from 1 to 0
         class scales:
-            termination = -0.0
-            tracking_lin_vel = 1.0
-            tracking_ang_vel = 0.5
-            lin_vel_z = -2.0
-            ang_vel_xy = 0#-0.05
-            orientation = -0.
-            torques = -0.00001
-            dof_vel = -0.
-            dof_acc = -2.5e-7
-            base_height = -0. 
-            feet_air_time =  1.0
-            collision = -1.
-            feet_stumble = -0.0 
-            action_rate = -0.01
-            stand_still = -0.
+            termination = -0.0  # Episode终止惩罚：未启用。设为负值（如-10.0）可在跌倒时给予额外惩罚
+            tracking_lin_vel = 1.0  # 奖励 跟踪XY方向线速度：控制实际线速度 与 commands速度的匹配度。权重最大，主导前进/后退训练
+            tracking_ang_vel = 0.5  # 奖励 跟踪yaw方向角速度：控制实际转向 与 commands角速度的匹配度。若机器人转弯不稳定，可降低权重（如0.3）
+            lin_vel_z = -2.0    # 惩罚 base的Z轴线速度：防止跳跃。若机器人跳跃频繁，增大惩罚（如-5.0）
+            ang_vel_xy = 0      # 惩罚 base的roll/pitch角速度：抑制机身俯仰和横滚。跌倒时增大（如-0.2），默认 -0.05
+            orientation = -0.   # 惩罚 base非水平姿态：抑制机身偏离水平面。地面不平时可减小（如-0.1）
+            torques = -0.00001  # 惩罚 关节扭矩过大：防止关节扭矩过大导致过热或损坏，设为负值（如-1e-4）, A1: -0.0001
+            dof_vel = -0.       # 惩罚 关节速度：抑制关节高速转动。若关节速度太快，设为负值（如-0.01）
+            dof_acc = -2.5e-7   # 惩罚 关节加速度：抑制关节速度突变。若步态抖动，增大惩罚（如-1e-6）
+            base_height = -0.   # 惩罚 base偏离目标高度：当高度低于 base_height_target 时触发
+            feet_air_time =  1.0    # 奖励 四足在每个action首次触地的空中时间，使其接近0.5s（对应2Hz的步频）
+            collision = -1.     # 惩罚 选定身体部位发生碰撞
+            feet_stumble = -0.0 # 惩罚 四足在 gap 和 pit 地形的垂直表面打滑。若无法足部容易接触gap的垂直面，则设为负值（如-0.1）
+            action_rate = -0.01 # 惩罚  action 在 相邻step 之间的差异。调大（如-0.05）可使运动更连续
+            stand_still = -0.   # 惩罚 commands 为 0 时的 关节位置 与 默认关节位置的偏差
 
-        only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
-        tracking_sigma = 0.15 # tracking reward = exp(-error^2/sigma)
-        soft_dof_pos_limit = 1. # percentage of urdf limits, values above this limit are penalized
-        soft_dof_vel_limit = 1.
-        soft_torque_limit = 1.
-        base_height_target = 1.
-        max_contact_force = 100. # forces above this value are penalized
+        only_positive_rewards = True # 负奖励保留：为 True 时，负总奖励裁剪到 0，避免早期训练频繁终止。复杂任务建议保持False
+        tracking_sigma = 0.15   # 跟踪奖励的高斯分布 标准差，tracking reward = exp(-error^2 / sigma)
+        soft_dof_pos_limit = 1. # 关节位置 软限位：关节角度超过 URDF 限位 100% 时触发惩罚。调低（如0.9）可提前约束
+        soft_dof_vel_limit = 1. # 关节速度 软限位：超过最大速度 100% 时惩罚，保护电机模型不过载
+        soft_torque_limit = 1.  # 关节力矩 软限位：超过额定扭矩 100% 时惩罚，防止仿真数值发散
+        base_height_target = 1. # 机身目标高度（要低于 init height）
+        max_contact_force = 100. # 选定身体部位判定发生碰撞时的 接触力阈值
 
     class normalization:
         class obs_scales:
@@ -233,8 +233,8 @@ class LeggedRobotCfg(BaseConfig):
     # viewer camera:
     class viewer:
         ref_env = 0
-        pos = [10, 0, 6]  # [m]
-        lookat = [11., 5, 3.]  # [m]
+        pos = [10, 0, 6]  # [m]，观察视角的位置
+        lookat = [11., 5, 3.]  # [m]，观察视角的焦点
 
     class sim:
         dt =  0.002

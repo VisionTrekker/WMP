@@ -32,19 +32,21 @@ from rsl_rl.datasets import pose3d
 from rsl_rl.datasets import motion_util
 
 
+# 运动数据加载器类，用于处理运动捕捉数据
 class AMPLoader:
+    # 定义各运动参数的 维度大小
+    POS_SIZE = 3  # 位置(x,y,z)
+    ROT_SIZE = 4  # 旋转(四元数)
+    JOINT_POS_SIZE = 12  # 关节位置
+    TAR_TOE_POS_LOCAL_SIZE = 12  # 足端目标位置
+    LINEAR_VEL_SIZE = 3  # 线速度
+    ANGULAR_VEL_SIZE = 3  # 角速度
+    JOINT_VEL_SIZE = 12  # 关节速度
+    TAR_TOE_VEL_LOCAL_SIZE = 12  # 足端目标速度
 
-    POS_SIZE = 3
-    ROT_SIZE = 4
-    JOINT_POS_SIZE = 12
-    TAR_TOE_POS_LOCAL_SIZE = 12
-    LINEAR_VEL_SIZE = 3
-    ANGULAR_VEL_SIZE = 3
-    JOINT_VEL_SIZE = 12
-    TAR_TOE_VEL_LOCAL_SIZE = 12
-
-    ROOT_POS_START_IDX = 0
-    ROOT_POS_END_IDX = ROOT_POS_START_IDX + POS_SIZE
+    # 定义各运动参数在数据数组中的索引范围
+    ROOT_POS_START_IDX = 0  # 根位置起始索引
+    ROOT_POS_END_IDX = ROOT_POS_START_IDX + POS_SIZE  # 根位置结束索引
 
     ROOT_ROT_START_IDX = ROOT_POS_END_IDX
     ROOT_ROT_END_IDX = ROOT_ROT_START_IDX + ROT_SIZE
@@ -70,23 +72,22 @@ class AMPLoader:
     def __init__(
             self,
             device,
-            time_between_frames,
-            data_dir='',
-            preload_transitions=False,
-            num_preload_transitions=1000000,
-            motion_files=glob.glob('datasets/motion_files2/*'),
+            time_between_frames,    # 帧间 时间间隔(秒)
+            data_dir='',            # 数据目录路径
+            preload_transitions=False,  # 是否预加载转换数据
+            num_preload_transitions=1000000,    # 预加载的转换数据数量
+            motion_files=glob.glob('datasets/motion_files2/*'), # 运动数据文件列表
             ):
-        """Expert dataset provides AMP observations from Dog mocap dataset.
-
-        time_between_frames: Amount of time in seconds between transition.
+        """
+        运动数据加载器：加载专家数据集数据（提供了 来自狗的动捕数据的 AMP观测结果）
         """
         self.device = device
         self.time_between_frames = time_between_frames
         
-        # Values to store for each trajectory.
-        self.trajectories = []
-        self.trajectories_full = []
-        self.trajectory_names = []
+        # 初始化存储各轨迹数据的列表
+        self.trajectories = []      # 存储处理后的轨迹数据(不含根位置和旋转)
+        self.trajectories_full = [] # 存储完整的轨迹数据
+        self.trajectory_names = []  # 轨迹名称列表
         self.trajectory_idxs = []
         self.trajectory_lens = []  # Traj length in seconds.
         self.trajectory_weights = []
@@ -152,18 +153,17 @@ class AMPLoader:
         self.all_trajectories_full = torch.vstack(self.trajectories_full)
 
     def reorder_from_pybullet_to_isaac(self, motion_data):
-        """Convert from PyBullet ordering to Isaac ordering.
-
-        Rearranges leg and joint order from PyBullet [FR, FL, RR, RL] to
-        IsaacGym order [FL, FR, RL, RR].
         """
+        关节顺序： PyBullet [FR,FL,RR,RL] ==> IsaacGym [FL,FR,RL,RR]
+        """
+        # 获取各运动参数
         root_pos = AMPLoader.get_root_pos_batch(motion_data)
         root_rot = AMPLoader.get_root_rot_batch(motion_data)
 
         jp_fr, jp_fl, jp_rr, jp_rl = np.split(
             AMPLoader.get_joint_pose_batch(motion_data), 4, axis=1)
-        joint_pos = np.hstack([jp_fl, jp_fr, jp_rl, jp_rr])
-    
+        joint_pos = np.hstack([jp_fl, jp_fr, jp_rl, jp_rr])  # 重排关节位置
+
         fp_fr, fp_fl, fp_rr, fp_rl = np.split(
             AMPLoader.get_tar_toe_pos_local_batch(motion_data), 4, axis=1)
         foot_pos = np.hstack([fp_fl, fp_fr, fp_rl, fp_rr])

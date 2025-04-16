@@ -40,11 +40,11 @@ from torch.nn.modules import rnn
 
 
 class ActorCriticWMP(nn.Module):
-    is_recurrent = False
+    is_recurrent = False    # 不是一个循环网络
 
-    def __init__(self, num_actor_obs,
-                 num_critic_obs,
-                 num_actions,
+    def __init__(self, num_actor_obs,   # 285 (53 + 33 + 12 + 187)
+                 num_critic_obs,    # 285 (53 + 33 + 12 + 187)
+                 num_actions,       # 12
                  encoder_hidden_dims=[256, 128],
                  wm_encoder_hidden_dims = [64, 32],
                  actor_hidden_dims=[256, 256, 256],
@@ -53,10 +53,10 @@ class ActorCriticWMP(nn.Module):
                  init_noise_std=1.0,
                  fixed_std=False,
                  latent_dim = 32,
-                 height_dim=187,
-                 privileged_dim=3 + 24,
+                 height_dim=187,    # 187
+                 privileged_dim=3 + 24, # 53
                  history_dim = 42*5,
-                 wm_feature_dim = 1536,
+                 wm_feature_dim = 1536, # 512
                  wm_latent_dim=16,
                  **kwargs):
         if kwargs:
@@ -64,16 +64,19 @@ class ActorCriticWMP(nn.Module):
                 [key for key in kwargs.keys()]))
         super(ActorCriticWMP, self).__init__()
 
-        activation = get_activation(activation)
+        activation = get_activation(activation) # ELU
 
         self.latent_dim = latent_dim
         self.height_dim = height_dim
         self.privileged_dim = privileged_dim
 
+        # 32 + 3 + 16
         mlp_input_dim_a = latent_dim + 3 + wm_latent_dim #latent vector + command + wm_latent
+        # 285 + 16
         mlp_input_dim_c = num_critic_obs + wm_latent_dim
 
-        # History Encoder
+        # History Encoder: 历史观测特征(42*5维) ==> 潜在特征(32维)
+        #   Linear(42*5 -> 256) --> ELU --> Linear(256 -> 128) --> ELU --> Linear(128 -> 32)
         encoder_layers = []
         encoder_layers.append(nn.Linear(history_dim, encoder_hidden_dims[0]))
         encoder_layers.append(activation)
@@ -85,7 +88,8 @@ class ActorCriticWMP(nn.Module):
                 encoder_layers.append(activation)
         self.history_encoder = nn.Sequential(*encoder_layers)
 
-        # World Model Feature Encoder
+        # World Model Feature Encoder: 世界模型特征(512维) ==> 潜在特征(16维)
+        #   Linear(512 -> 64) --> ELU --> Linear(64 -> 32) --> ELU --> Linear(32 -> 16)
         wm_encoder_layers = []
         wm_encoder_layers.append(nn.Linear(wm_feature_dim, wm_encoder_hidden_dims[0]))
         wm_encoder_layers.append(activation)
@@ -97,7 +101,8 @@ class ActorCriticWMP(nn.Module):
                 wm_encoder_layers.append(activation)
         self.wm_feature_encoder = nn.Sequential(*wm_encoder_layers)
 
-        # Critic World Model Feature Encoder
+        # Critic World Model Feature Encoder: 世界模型特征(512维) ==> 潜在特征(16维)
+        #   Linear(512 -> 64) --> ELU --> Linear(64 -> 32) --> ELU --> Linear(32 -> 16)
         critic_wm_encoder_layers = []
         critic_wm_encoder_layers.append(nn.Linear(wm_feature_dim, wm_encoder_hidden_dims[0]))
         critic_wm_encoder_layers.append(activation)
@@ -109,7 +114,8 @@ class ActorCriticWMP(nn.Module):
                 critic_wm_encoder_layers.append(activation)
         self.critic_wm_feature_encoder = nn.Sequential(*critic_wm_encoder_layers)
 
-        # Policy
+        # Policy: 历史观测潜在特征(32维) + 命令(3维) + 世界模型潜在特征(16维) ==> 动作(12维)
+        #   Linear(32+3+16 -> 256) --> ELU --> Linear(256 -> 256) --> ELU --> Linear(256 -> 256) --> ELU --> Linear(256 -> 12)
         actor_layers = []
         actor_layers.append(nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]))
         actor_layers.append(activation)
@@ -122,7 +128,8 @@ class ActorCriticWMP(nn.Module):
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
 
-        # Value function
+        # Value function: 特权观测特征(285维) + 世界模型潜在特征(16维) ==> 状态价值估计(1维)
+        #   Linear(285+16 -> 256) --> ELU --> Linear(256 -> 256) --> ELU --> Linear(256 -> 256) --> ELU --> Linear(256 -> 1)
         critic_layers = []
         critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
         critic_layers.append(activation)
@@ -142,9 +149,9 @@ class ActorCriticWMP(nn.Module):
 
         # Action noise
         self.fixed_std = fixed_std
-        std = init_noise_std * torch.ones(num_actions)
+        std = init_noise_std * torch.ones(num_actions)  # (12,)
         self.std = torch.tensor(std) if fixed_std else nn.Parameter(std)
-        self.distribution = None
+        self.distribution = None    # action 分布
         # disable args validation for speedup
         Normal.set_default_validate_args = False
 
@@ -177,18 +184,25 @@ class ActorCriticWMP(nn.Module):
         return self.distribution.entropy().sum(dim=-1)
 
     def update_distribution(self, observations):
-        mean = self.actor(observations)
+        mean = self.actor(observations) # (num_envs, 12)
         std = self.std.to(mean.device)
         self.distribution = Normal(mean, mean * 0. + std)
 
     def act(self, observations, history, wm_feature, **kwargs):
-        latent_vector = self.history_encoder(history)
-        command = observations[:, self.privileged_dim + 6:self.privileged_dim + 9]
-        wm_latent_vector = self.wm_feature_encoder(wm_feature)
+        """
+        action 采样：从 action 高斯分布中进行采样
+             observations (num_envs, 285)
+             history      (num_envs, 42*5)
+             wm_feature   (num_envs, 512)
+        """
+        latent_vector = self.history_encoder(history)   # 历史观测潜在特征 (num_envs, 32)
+        command = observations[:, self.privileged_dim + 6:self.privileged_dim + 9]  # command (num_envs, 3)
+        wm_latent_vector = self.wm_feature_encoder(wm_feature)  # 世界模型潜在特征 (num_envs, 16)
         concat_observations = torch.concat((latent_vector, command, wm_latent_vector),
                                            dim=-1)
+        # 更新 action 分布
         self.update_distribution(concat_observations)
-        return self.distribution.sample()
+        return self.distribution.sample()   # 采样 (num_envs, 12)
 
     def get_latent_vector(self, observations, history, **kwargs):
         latent_vector = self.history_encoder(history)
@@ -203,6 +217,7 @@ class ActorCriticWMP(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, observations, history, wm_feature):
+        """ 推理模式下的 action （直接返回 actor 的输出）"""
         latent_vector = self.history_encoder(history)
         command = observations[:, self.privileged_dim + 6:self.privileged_dim + 9]
         wm_latent_vector = self.wm_feature_encoder(wm_feature)
@@ -212,7 +227,8 @@ class ActorCriticWMP(nn.Module):
         return actions_mean
 
     def evaluate(self, critic_observations, wm_feature,  **kwargs):
-        wm_latent_vector = self.critic_wm_feature_encoder(wm_feature)
+        """ 状态价值评估 """
+        wm_latent_vector = self.critic_wm_feature_encoder(wm_feature)   # 世界模型潜在特征 (num_envs, 16)
         concat_observations = torch.concat((critic_observations, wm_latent_vector),
                                            dim=-1)
 

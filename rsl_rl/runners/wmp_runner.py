@@ -100,7 +100,8 @@ class WMPRunner:
         # 4. RL
         # 历史观测维度
         self.history_dim = history_length * (self.env.num_obs - self.env.privileged_dim - self.env.height_dim - 3) # 5 * (总观测维度285 - 特权观测维度53 - 高度图维度187 - 排除3维的命令(线速度x2 + 角速度)3) = 5 * 42
-        # 4.1 actor - critic 网络：整合世界模型特征，处理历史观测，处理特权观测和高度图
+        # 4.1 Actor - Critic 网络（包含 history_encoder、wm_feature_encoder、critic_wm_feature_encoder、actor、critic）
+        # 处理 世界模型特征、历史观测特征，然后结合 command 或 特权观测信息 进行 action 预测 和 状态价值估计
         actor_critic = ActorCriticWMP(num_actor_obs=num_actor_obs,
                                           num_critic_obs=num_critic_obs,
                                           num_actions=self.env.num_actions,

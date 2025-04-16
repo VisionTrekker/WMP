@@ -35,37 +35,45 @@ class WorldModel(nn.Module):
     def __init__(self, config, obs_shape, use_camera):
         super(WorldModel, self).__init__()
         # self._step = step
-        self._use_amp = True if config.precision == 16 else False
+        self._use_amp = True if config.precision == 16 else False   # 32，因此 False
         self._config = config
         self.device = self._config.device
 
+        # 1. encoder: 特征输出维度 (5120,)
         self.encoder = networks.MultiEncoder(obs_shape, **config.encoder, use_camera=use_camera)
-        self.embed_size = self.encoder.outdim
+        # 2. 循环状态空间模型 RSSM
+        self.embed_size = self.encoder.outdim   # 5120
         self.dynamics = networks.RSSM(
-            config.dyn_stoch,
-            config.dyn_deter,
-            config.dyn_hidden,
-            config.dyn_rec_depth,
-            config.dyn_discrete,
-            config.act,
-            config.norm,
-            config.dyn_mean_act,
-            config.dyn_std_act,
-            config.dyn_min_std,
-            config.unimix_ratio,
-            config.initial,
-            config.num_actions,
-            self.embed_size,
+            config.dyn_stoch,   # 32
+            config.dyn_deter,   # 512
+            config.dyn_hidden,  # 512
+            config.dyn_rec_depth,   # 1
+            config.dyn_discrete,    # 32
+            config.act,     # 'SiLU'
+            config.norm,    # True
+            config.dyn_mean_act,    # 'none'
+            config.dyn_std_act, # 'sigmoid2'
+            config.dyn_min_std, # 0.1
+            config.unimix_ratio,    # 0.01
+            config.initial,     # 'learned'
+            config.num_actions, # 12
+            self.embed_size,    # 5120
             config.device,
         )
+        # 3. Decoder 及 奖励预测器
         self.heads = nn.ModuleDict()
-        if config.dyn_discrete:
+        # 计算从 RSSM 输出的特征维度：离散模式下：随机部分(32类别×32维度) + 确定性部分(512维) = 1536维
+        if config.dyn_discrete: # True
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:
             feat_size = config.dyn_stoch + config.dyn_deter
+        # 3.1 Decoder: 使用MSE损失重建 深度图像 (64, 64, 1) ，适用symbol_mse处理 本体感知数据 (33,)
+        # 输出 {"images": MSEDist(out_cnn), "prop": SymlogDist(out_mlp)}
         self.heads["decoder"] = networks.MultiDecoder(
             feat_size, obs_shape, **config.decoder, use_camera=use_camera
         )
+        # 3.2 Reward: 使用离散分布预测奖励值(255个分桶), 并经过symlog变换处理
+        # 输出 DiscDist(out)
         self.heads["reward"] = networks.MLP(
             feat_size,
             (255,) if config.reward_head["dist"] == "symlog_disc" else (),
@@ -92,19 +100,22 @@ class WorldModel(nn.Module):
         # )
         for name in config.grad_heads:
             assert name in self.heads, name
+
+        # 4. 配置优化器
         self._model_opt = tools.Optimizer(
             "model",
             self.parameters(),
-            config.model_lr,
-            config.opt_eps,
-            config.grad_clip,
-            config.weight_decay,
-            opt=config.opt,
+            config.model_lr,    # 1e-4
+            config.opt_eps,     # 1e-8
+            config.grad_clip,   # 1000
+            config.weight_decay,    # 0.0
+            opt=config.opt,     # 'adam'
             use_amp=self._use_amp,
         )
         print(
             f"Optimizer model_opt has {sum(param.numel() for param in self.parameters())} variables."
         )
+        # 5. 设置 损失权重 （奖励 0.0, image 1.0）
         # other losses are scaled by 1.0.
         # can set different scale for terms in decoder here
         self._scales = dict(

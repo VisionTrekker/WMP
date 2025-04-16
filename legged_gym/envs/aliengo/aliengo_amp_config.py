@@ -42,13 +42,13 @@ class AliengoAMPCfg(LeggedRobotCfg):
     class env(LeggedRobotCfg.env):
         num_envs = 4096
         include_history_steps = None  # 要包含的 历史记录 step 数
-        prop_dim = 33 # proprioception
+        prop_dim = 33   # 本体感知维度
         action_dim = 12
         privileged_dim = 24 + 26 + 3  # privileged_obs[:,:privileged_dim] is the privileged information in privileged_obs, include 3-dim base linear vel
         height_dim = 187  # privileged_obs[:,-height_dim:] is the heightmap in privileged_obs
         forward_height_dim = 525 # for depth image prediction
         num_observations = prop_dim + privileged_dim + height_dim + action_dim
-        num_privileged_obs = prop_dim + privileged_dim + height_dim + action_dim    # 特权观测维度：共285维 (53 + 33 + 12 + 187)，前53维是特权信息（包含3维base的线速度），中间45维是本体感知，后187维是特权观测中的 heightmap
+        num_privileged_obs = prop_dim + privileged_dim + height_dim + action_dim    # 特权观测维度：共285维 (53 + 33 + 12 + 187)，前53维是特权信息（包含3维base的线速度），中间45维是本体感知+action，后187维是特权观测中的 heightmap
         reference_state_initialization = False
         reference_state_initialization_prob = 0.85
         amp_motion_files = MOTION_FILES
@@ -258,7 +258,7 @@ class AliengoAMPCfg(LeggedRobotCfg):
             dof_error = -0.05   # 惩罚 关节位置与默认位置的偏差，A1 为 -0.04
 
             lin_vel_z = -1.0
-            cheat = -1    # 惩罚 绕过障碍物的行为
+            cheat = -1    # 惩罚 绕过障碍物的行为（只考虑 rough flat 之前的地形）
             stuck = -1.5  # 惩罚 卡住，A1 为 -1， Aliengo 可尝试改为 -1.5
 
 
@@ -319,7 +319,7 @@ class AliengoAMPCfgPPO(LeggedRobotCfgPPO):
         algorithm_class_name = 'AMPPPO'
         policy_class_name = 'ActorCritic'
         max_iterations = 20000  # number of policy updates
-        save_interval = 1000
+        save_interval = 500
 
         amp_reward_coef = 0.5 * 0.02  # set to 0 means not use amp reward
         amp_motion_files = MOTION_FILES

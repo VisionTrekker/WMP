@@ -37,7 +37,7 @@ class DepthPredictor(nn.Module):
 
         # add this to fully recover the process of conv encoder
         h, w = depth_image_dims
-        stages = int(np.log2(w) - np.log2(minres))
+        stages = int(np.log2(w) - np.log2(minres))  # 4
         self.h_list = []
         self.w_list = []
         for i in range(stages):
@@ -46,7 +46,7 @@ class DepthPredictor(nn.Module):
             self.w_list.append(w)
         self.h_list = self.h_list[::-1]
         self.w_list = self.w_list[::-1]
-        self.h_list.append(depth_image_dims[0])
+        self.h_list.append(depth_image_dims[0]) # [4, 8, 16, 32, 64]
         self.w_list.append(depth_image_dims[1])
 
         super(DepthPredictor, self).__init__()
@@ -56,13 +56,13 @@ class DepthPredictor(nn.Module):
         # layer_num = int(np.log2(shape[2]) - np.log2(minres))
         # self._minres = minres
         # out_ch = minres**2 * depth * 2 ** (layer_num - 1)
-        out_ch = self.h_list[0] * self.w_list[0] * depth * 2 ** (len(self.h_list) - 2)
-        self._embed_size = out_ch
+        out_ch = self.h_list[0] * self.w_list[0] * depth * 2 ** (len(self.h_list) - 2)  # 4 * 4 * 32 * 2^3 = 4096
+        self._embed_size = out_ch   # 4096
 
-        in_dim = out_ch // (self.h_list[0] * self.w_list[0])
-        out_dim = in_dim // 2
+        in_dim = out_ch // (self.h_list[0] * self.w_list[0])    # 256
+        out_dim = in_dim // 2   # 128
 
-        # Encoder
+        # Encoder: Linear(525 + 33 -> 256 ) --> ELU --> Linear(256 -> 128) --> ELU --> Linear(128 -> 4096)
         encoder_layers = []
         encoder_layers.append(nn.Linear(forward_heightamp_dim + prop_dim, encoder_hidden_dims[0]))
         encoder_layers.append(act())
@@ -117,24 +117,28 @@ class DepthPredictor(nn.Module):
             # h, w = h * 2, w * 2
         [m.apply(tools.weight_init) for m in layers[:-1]]
         layers[-1].apply(tools.uniform_weight_init(outscale))
+        # ConvT(256, 128, 8) --> LayerNorm --> ELU
+        # ConvT(128, 64, 16) --> LayerNorm --> ELU
+        # ConvT(64, 32, 32) --> LayerNorm --> ELU
+        # ConvT(32, 1, 64) --> LayerNorm --> ELU
         self.layers = nn.Sequential(*layers)
 
 
     def forward(self, forward_heightmap, prop):
-        x = torch.concat((forward_heightmap, prop), dim=-1)
-        x = self.encoder(x)
-        # (batch, time, -1) -> (batch * time, h, w, ch)
+        x = torch.concat((forward_heightmap, prop), dim=-1) # (batch * time, 525 + 33)
+        x = self.encoder(x)     # ==> (batch * time, 4096)
+        # (batch, time, -1) -> (batch * time, h, w, ch)     ==> (batch * time, 4, 4, 256)
         x = x.reshape(
             [-1, self.h_list[0], self.w_list[0], self._embed_size // (self.h_list[0] * self.w_list[0])]
         )
-        # (batch, time, -1) -> (batch * time, ch, h, w)
+        # (batch, time, -1) -> (batch * time, ch, h, w)     ==> (batch * time, 256, 4, 4)
         x = x.permute(0, 3, 1, 2)
         # print('init decoder shape:', x.shape)
         # for layer in self.layers:
         #     x = layer(x)
         #     print(x.shape)
-        x = self.layers(x)
-        mean = x.permute(0, 2, 3, 1)
+        x = self.layers(x)      # ==> (batch * time, 1, 64, 64)
+        mean = x.permute(0, 2, 3, 1)    # ==> (batch * time, 64, 64, 1)
         if self._cnn_sigmoid:
             mean = F.sigmoid(mean)
         # else:

@@ -967,7 +967,7 @@ class LeggedRobot(BaseTask):
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)  # 关节状态
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]  # 关节位置 (num_env, 12, 1)
         self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]  # 关节速度 (num_env, 12, 1)
-        self.base_quat = self.root_states[:, 3:7]  # base 的四元数
+        self.base_quat = self.root_states[:, 3:7]  # base 的旋转四元数（世界坐标系）
 
         # 存储每个刚体在xyz方向的接触力，(num_envs, num_bodies, 3)
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3)
@@ -990,7 +990,7 @@ class LeggedRobot(BaseTask):
         self.extras = {}  # 额外数据字典
         self.noise_scale_vec = self._get_noise_scale_vec(self.cfg)
         self.gravity_vec = to_torch(get_axis_params(-1., self.up_axis_idx), device=self.device).repeat((self.num_envs, 1))
-        self.forward_vec = to_torch([1., 0., 0.], device=self.device).repeat((self.num_envs, 1))
+        self.forward_vec = to_torch([1., 0., 0.], device=self.device).repeat((self.num_envs, 1))    # 机器人的前进方向（base坐标系）
         # 初始化 actions 和 torques 张量
         self.torques = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.p_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
@@ -1222,6 +1222,7 @@ class LeggedRobot(BaseTask):
         # save body names from the asset
         body_names = self.gym.get_asset_rigid_body_names(robot_asset)
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
+        print("dof_names: ", self.dof_names)
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)
         feet_names = [s for s in body_names if self.cfg.asset.foot_name in s]
@@ -1659,9 +1660,11 @@ class LeggedRobot(BaseTask):
         return torch.sum(torch.square(self.torques - self.last_torques), dim=1)
 
     def _reward_cheat(self):
-        # 惩罚 绕过障碍物的行为
-        forward = quat_apply(self.base_quat, self.forward_vec)
+        # 惩罚 绕过障碍物的行为（只考虑 rough flat 之前的地形）
+        forward = quat_apply(self.base_quat, self.forward_vec)  # 将 机器人前进方向 从 base坐标系 ==> 世界坐标系
+        # 计算 yaw角（rad），只考虑 rough flat 之前的地形
         heading = torch.atan2(forward[:self.roughflat_start_idx, 1], forward[:self.roughflat_start_idx, 0])
+        # 判定是否绕行：yaw角 绝对值 > 1.0 rad（57 度）
         cheat = (heading > 1.0) | (heading < -1.0)
         cheat_penalty = torch.zeros(self.num_envs, device=self.device)
         cheat_penalty[:self.roughflat_start_idx] = cheat
@@ -1702,5 +1705,5 @@ class LeggedRobot(BaseTask):
 
     def _reward_stuck(self):
         # 惩罚 卡住
-        # 卡住：base 的 X方向线速度 < 0.1 m/s，但 commands 的 X方向线速度 > 0.1 m/s
+        # 判定是否卡住：base 的 X方向线速度 < 0.1 m/s，但 commands 的 X方向线速度 > 0.1 m/s
         return (torch.abs(self.base_lin_vel[:, 0]) < 0.1) * (torch.abs(self.commands[:, 0]) > 0.1)

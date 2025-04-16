@@ -209,7 +209,7 @@ class TaskRegistry():
         # print(train_cfg.runner_class_name)
         train_cfg_dict = class_to_dict(train_cfg)
 
-        # 3. 创建runner，WMPRunner 实例（在 rsl_rl/runners/wmp_runner.py 内）
+        # 3. 创建 runner，WMPRunner 实例（在 rsl_rl/runners/wmp_runner.py 内）
         runner = WMPRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
 
         # 4. 若启用了 resume，则加载之前训练的模型 (logs/experiment_name/load_run/model_xxx.pt)

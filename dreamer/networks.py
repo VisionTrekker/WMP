@@ -34,22 +34,25 @@ from torch import distributions as torchd
 from . import tools
 
 class RSSM(nn.Module):
+    """
+    循环状态空间模型
+    """
     def __init__(
         self,
-        stoch=30,
-        deter=200,
-        hidden=200,
-        rec_depth=1,
-        discrete=False,
+        stoch=30,   # 随机状态维度，32
+        deter=200,  # 确定性状态维度，512
+        hidden=200, # 隐藏层维度，512
+        rec_depth=1,    # 1
+        discrete=False, # 离散状态数，32
         act="SiLU",
         norm=True,
         mean_act="none",
-        std_act="softplus",
+        std_act="softplus", # 'sigmoid2'
         min_std=0.1,
         unimix_ratio=0.01,
         initial="learned",
-        num_actions=None,
-        embed=None,
+        num_actions=None,   # 动作空间维度，12
+        embed=None,     # 编码器输出维度，5120
         device=None,
     ):
         super(RSSM, self).__init__()
@@ -68,20 +71,24 @@ class RSSM(nn.Module):
         self._embed = embed
         self._device = device
 
+        # 1. _img_in_layers: Linear(1036/44 -> 512) --> LayerNorm --> SiLU
         inp_layers = []
-        if self._discrete:
+        if self._discrete:  # 离散情况: 32 * 32 + 12 = 1036
             inp_dim = self._stoch * self._discrete + num_actions
-        else:
+        else:    # 连续情况: 32 + 12 = 44
             inp_dim = self._stoch + num_actions
-        inp_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
+        inp_layers.append(nn.Linear(inp_dim, self._hidden, bias=False)) # (1036, 512)
         if norm:
             inp_layers.append(nn.LayerNorm(self._hidden, eps=1e-03))
         inp_layers.append(act())
         self._img_in_layers = nn.Sequential(*inp_layers)
         self._img_in_layers.apply(tools.weight_init)
+
+        # 2. _cell: GRU单元, Linear(512 + 512 -> 512 * 3) --> LayerNorm
         self._cell = GRUCell(self._hidden, self._deter, norm=norm)
         self._cell.apply(tools.weight_init)
 
+        # 3. _img_out_layers: Linear(512 -> 512) --> LayerNorm --> SiLU
         img_out_layers = []
         inp_dim = self._deter
         img_out_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
@@ -91,6 +98,7 @@ class RSSM(nn.Module):
         self._img_out_layers = nn.Sequential(*img_out_layers)
         self._img_out_layers.apply(tools.weight_init)
 
+        # 4. _obs_out_layers: Linear(512 + 5120 -> 512) --> LayerNorm ->- SiLU
         obs_out_layers = []
         inp_dim = self._deter + self._embed
         obs_out_layers.append(nn.Linear(inp_dim, self._hidden, bias=False))
@@ -100,20 +108,24 @@ class RSSM(nn.Module):
         self._obs_out_layers = nn.Sequential(*obs_out_layers)
         self._obs_out_layers.apply(tools.weight_init)
 
-        if self._discrete:
+
+        if self._discrete:  # 离散
+            # 5. _imgs_stat_layer: Linear(512 -> 32 * 32 = 1024)
             self._imgs_stat_layer = nn.Linear(
                 self._hidden, self._stoch * self._discrete
             )
             self._imgs_stat_layer.apply(tools.uniform_weight_init(1.0))
+            # 6. _obs_stat_layer: Linear(512 -> 32 * 32 = 1024)
             self._obs_stat_layer = nn.Linear(self._hidden, self._stoch * self._discrete)
             self._obs_stat_layer.apply(tools.uniform_weight_init(1.0))
-        else:
+        else:   # 连续
             self._imgs_stat_layer = nn.Linear(self._hidden, 2 * self._stoch)
             self._imgs_stat_layer.apply(tools.uniform_weight_init(1.0))
             self._obs_stat_layer = nn.Linear(self._hidden, 2 * self._stoch)
             self._obs_stat_layer.apply(tools.uniform_weight_init(1.0))
 
-        if self._initial == "learned":
+        if self._initial == "learned":  # 默认
+            # (1, 512)
             self.W = torch.nn.Parameter(
                 torch.zeros((1, self._deter), device=torch.device(self._device)),
                 requires_grad=True,
@@ -320,30 +332,34 @@ class RSSM(nn.Module):
 class MultiEncoder(nn.Module):
     def __init__(
         self,
-        shapes,
-        mlp_keys,
-        cnn_keys,
-        act,
-        norm,
-        cnn_depth,
-        kernel_size,
-        minres,
-        mlp_layers,
-        mlp_units,
-        symlog_inputs,
+        shapes, # {"prop": (33,), "image": (64, 64, 1)}
+        mlp_keys,   # '.*'
+        cnn_keys,   # 'image'
+        act,    # 'SiLU'
+        norm,   # True
+        cnn_depth,  # 32
+        kernel_size,    # 4
+        minres,     # 4
+        mlp_layers, # 5
+        mlp_units,  # 1024
+        symlog_inputs,  # True
         use_camera = False,
     ):
         super(MultiEncoder, self).__init__()
         self.use_camera = use_camera
+        # 过滤一些 keys
         excluded = ("is_first", "is_last", "is_terminal", "reward",  "height_map")
+        # 过滤后的 shapes: {"prop": (33,), "image": (64, 64, 1)}
         shapes = {
             k: v
             for k, v in shapes.items()
             if k not in excluded and not k.startswith("log_")
         }
+        # {"image": (64, 64, 1)}
         self.cnn_shapes = {
             k: v for k, v in shapes.items() if len(v) == 3 and re.match(cnn_keys, k)
         }
+        # {"prop": (33,)}
         self.mlp_shapes = {
             k: v
             for k, v in shapes.items()
@@ -354,26 +370,33 @@ class MultiEncoder(nn.Module):
 
         self.outdim = 0
         if self.cnn_shapes:
-            input_ch = sum([v[-1] for v in self.cnn_shapes.values()])
-            input_shape = tuple(self.cnn_shapes.values())[0][:2] + (input_ch,)
+            input_ch = sum([v[-1] for v in self.cnn_shapes.values()])   # 所有输入图像的 ch（因只有深度图，所以为 1）
+            input_shape = tuple(self.cnn_shapes.values())[0][:2] + (input_ch,)  # (64, 64, 1)
+            # (batch, time, 64, 64, 1) ==> (batch, time, 4096)
             self._cnn = ConvEncoder(
-                input_shape, cnn_depth, act, norm, kernel_size, minres
+                input_shape, # (64, 64, 1)
+                cnn_depth,  # 32
+                act,        # 'SiLU'
+                norm,       # True
+                kernel_size, # 4
+                minres  # 4
             )
-            self.outdim += self._cnn.outdim
+            self.outdim += self._cnn.outdim # 4096
             print('cnn outdim', self._cnn.outdim)
         if self.mlp_shapes:
             input_size = sum([sum(v) for v in self.mlp_shapes.values()])
+            # (batch, time, 33) ==> (batch, time, 1024)
             self._mlp = MLP(
-                input_size,
+                input_size, # 33
                 None,
-                mlp_layers,
-                mlp_units,
-                act,
-                norm,
-                symlog_inputs=symlog_inputs,
+                mlp_layers, # 5
+                mlp_units,  # 1024
+                act,    # 'SiLU'
+                norm,   # True
+                symlog_inputs=symlog_inputs,    # True
                 name="Encoder",
             )
-            self.outdim += mlp_units
+            self.outdim += mlp_units    # 4096 + 1024 = 5120
             print('mlp outdim', mlp_units)
 
         print('total outdim:', self.outdim)
@@ -389,37 +412,39 @@ class MultiEncoder(nn.Module):
         if self.mlp_shapes:
             inputs = torch.cat([obs[k] for k in self.mlp_shapes], -1)
             outputs.append(self._mlp(inputs))
-        outputs = torch.cat(outputs, -1)
+        outputs = torch.cat(outputs, -1)    # (batch, time, 5120)
         return outputs
 
 
 class MultiDecoder(nn.Module):
     def __init__(
         self,
-        feat_size,
-        shapes,
-        mlp_keys,
-        cnn_keys,
-        act,
-        norm,
-        cnn_depth,
-        kernel_size,
-        minres,
-        mlp_layers,
-        mlp_units,
-        cnn_sigmoid,
-        image_dist,
-        vector_dist,
-        outscale,
+        feat_size,  # 1536
+        shapes,     # {"prop": (33,), "image": (64, 64, 1)}
+        mlp_keys,   # '.*'
+        cnn_keys,   # 'image'
+        act,    # 'SiLU'
+        norm,   # True
+        cnn_depth,  # 32
+        kernel_size,    # 4
+        minres,     # 4
+        mlp_layers, # 5
+        mlp_units,  # 1024
+        cnn_sigmoid,    # False
+        image_dist,     # mse
+        vector_dist,    # symlog_mse
+        outscale,       # 1.0
         use_camera=False,
     ):
         super(MultiDecoder, self).__init__()
         self.use_camera = use_camera
         excluded = ("is_first", "is_last", "is_terminal", "height_map")
         shapes = {k: v for k, v in shapes.items() if k not in excluded}
+        # {"image": (64, 64, 1)}
         self.cnn_shapes = {
             k: v for k, v in shapes.items() if len(v) == 3 and re.match(cnn_keys, k)
         }
+        # {"prop": (33,)}
         self.mlp_shapes = {
             k: v
             for k, v in shapes.items()
@@ -429,29 +454,31 @@ class MultiDecoder(nn.Module):
         print("Decoder MLP shapes:", self.mlp_shapes)
 
         if self.cnn_shapes:
-            some_shape = list(self.cnn_shapes.values())[0]
-            shape = (sum(x[-1] for x in self.cnn_shapes.values()),) + some_shape[:-1]
+            some_shape = list(self.cnn_shapes.values())[0]  # (64, 64, 1)
+            shape = (sum(x[-1] for x in self.cnn_shapes.values()),) + some_shape[:-1]   # 所有输入图像的维度（因只有深度图，所以为 ch = 1, (1, 64, 64)）
+            # (batch, time, 1536) ==> (batch, time, 64, 64, 1)
             self._cnn = ConvDecoder(
-                feat_size,
-                shape,
-                cnn_depth,
-                act,
-                norm,
-                kernel_size,
-                minres,
-                outscale=outscale,
-                cnn_sigmoid=cnn_sigmoid,
+                feat_size,  # 1536
+                shape,      # (1, 64, 64)
+                cnn_depth,  # 32
+                act,    # 'SiLU'
+                norm,   # True
+                kernel_size,    # 4
+                minres,         # 4
+                outscale=outscale,  # 1.0
+                cnn_sigmoid=cnn_sigmoid,    # False
             )
         if self.mlp_shapes:
+            # (batch, time, 1536) ==> {"prop": SymlogDist(out_mlp)}, 其中out_mlp的维度为 (33,)
             self._mlp = MLP(
-                feat_size,
-                self.mlp_shapes,
-                mlp_layers,
-                mlp_units,
-                act,
-                norm,
-                vector_dist,
-                outscale=outscale,
+                feat_size,  # 1536
+                self.mlp_shapes,    # {"prop": (33,)}
+                mlp_layers,     # 5
+                mlp_units,      # 1024
+                act,    # 'SiLU'
+                norm,   # True
+                vector_dist,    # symlog_mse
+                outscale=outscale,  # 1.0
                 name="Decoder",
             )
         self._image_dist = image_dist
@@ -460,9 +487,10 @@ class MultiDecoder(nn.Module):
         dists = {}
         if self.cnn_shapes and self.use_camera:
             feat = features
-            outputs = self._cnn(feat)
+            outputs = self._cnn(feat)   # (batch, time, 64, 64, 1)
             split_sizes = [v[-1] for v in self.cnn_shapes.values()]
             outputs = torch.split(outputs, split_sizes, -1)
+            # {"images": MSEDist(mean)}, 其中mean的维度为 (batch, time, 64, 64, 1)
             dists.update(
                 {
                     key: self._make_image_dist(output)
@@ -471,6 +499,8 @@ class MultiDecoder(nn.Module):
             )
         if self.mlp_shapes:
             dists.update(self._mlp(features))
+        # {"images": MSEDist(out_cnn), "prop": SymlogDist(out_mlp)}
+        # out_cnn 维度为 (batch, time, 64, 64, 1) , out_mlp 维度为 (33,)
         return dists
 
     def _make_image_dist(self, mean):
@@ -486,21 +516,22 @@ class MultiDecoder(nn.Module):
 class ConvEncoder(nn.Module):
     def __init__(
         self,
-        input_shape,
-        depth=32,
+        input_shape,    # (64, 64, 1)
+        depth=32,   # 第一个卷积的输出通道数
         act="SiLU",
-        norm=True,
+        norm=True,  # 是否使用层归一化
         kernel_size=4,
-        minres=4,
+        minres=4,   # 最小分辨率
     ):
         super(ConvEncoder, self).__init__()
         act = getattr(torch.nn, act)
         h, w, input_ch = input_shape
-        stages = int(np.log2(w) - np.log2(minres))
+        stages = int(np.log2(w) - np.log2(minres))  # 下采样卷积层的个数 = 6 - 2 = 4
         in_dim = input_ch
         out_dim = depth
         layers = []
         for i in range(stages):
+            # 添加带padding的卷积层
             layers.append(
                 Conv2dSamePad(
                     in_channels=in_dim,
@@ -510,41 +541,47 @@ class ConvEncoder(nn.Module):
                     bias=False,
                 )
             )
-            if norm:
+            if norm:    # 添加层归一化
                 layers.append(ImgChLayerNorm(out_dim))
-            layers.append(act())
+            layers.append(act())    # 添加激活函数
             in_dim = out_dim
             out_dim *= 2
             h, w = (h+1) // 2, (w+1) // 2
+        # out_dim = 32 * 2^4 = 512
+        # h, w = 4, 4
 
-        self.outdim = out_dim // 2 * h * w
+        self.outdim = out_dim // 2 * h * w  # 256 * 4 * 4 = 4096
+        # Conv(1, 32, 32) --> LayerNorm --> SiLU
+        # Conv(32, 64, 16) --> LayerNorm --> SiLU
+        # Conv(64, 128, 8) --> LayerNorm --> SiLU
+        # Conv(128, 256, 4) --> LayerNorm --> SiLU
         self.layers = nn.Sequential(*layers)
         self.layers.apply(tools.weight_init)
 
     def forward(self, obs):
-        obs -= 0.5
-        # (batch, time, h, w, ch) -> (batch * time, h, w, ch)
+        obs -= 0.5  # 归一化到 [-0.5, 0.5]
+        # (batch, time, h, w, ch) -> (batch * time, h, w, ch)   ==> (batch * time, 64, 64, 1)
         x = obs.reshape((-1,) + tuple(obs.shape[-3:]))
-        # (batch * time, h, w, ch) -> (batch * time, ch, h, w)
+        # (batch * time, h, w, ch) -> (batch * time, ch, h, w)  ==> (batch * time, 1, 64, 64)
         x = x.permute(0, 3, 1, 2)
         # print('init encoder shape:', x.shape)
         # for layer in self.layers:
         #     x = layer(x)
         #     print(x.shape)
-        x = self.layers(x)
-        # (batch * time, ...) -> (batch * time, -1)
+        x = self.layers(x)  # (batch * time, ch, h, w)  ==> (batch * time, 256, 4, 4)
+        # (batch * time, ...) -> (batch * time, -1)     ==> (batch * time, 256 * 4 * 4)
         x = x.reshape([x.shape[0], np.prod(x.shape[1:])])
-        # (batch * time, -1) -> (batch, time, -1)
+        # (batch * time, -1) -> (batch, time, -1)       ==> (batch, time, 256 * 4 * 4)
         return x.reshape(list(obs.shape[:-3]) + [x.shape[-1]])
 
 
 class ConvDecoder(nn.Module):
     def __init__(
         self,
-        feat_size,
-        shape=(3, 64, 64),
+        feat_size,  # 1536
+        shape=(3, 64, 64),  # (1, 64, 64)
         depth=32,
-        act=nn.ELU,
+        act=nn.ELU, # 'SiLU'
         norm=True,
         kernel_size=4,
         minres=4,
@@ -553,46 +590,47 @@ class ConvDecoder(nn.Module):
     ):
         # add this to fully recover the process of conv encoder
         input_ch, h, w = shape
-        stages = int(np.log2(w) - np.log2(minres))
+        stages = int(np.log2(w) - np.log2(minres))  # 4
+
         self.h_list = []
         self.w_list = []
         for i in range(stages):
             h, w = (h+1) // 2, (w+1) // 2
             self.h_list.append(h)
             self.w_list.append(w)
-        self.h_list = self.h_list[::-1]
+        self.h_list = self.h_list[::-1] # [4, 8, 16, 32]
         self.w_list = self.w_list[::-1]
-        self.h_list.append(shape[1])
+        self.h_list.append(shape[1])    # [4, 8, 16, 32, 64]
         self.w_list.append(shape[2])
 
         super(ConvDecoder, self).__init__()
         act = getattr(torch.nn, act)
         self._shape = shape
         self._cnn_sigmoid = cnn_sigmoid
-        layer_num = len(self.h_list) - 1
+        layer_num = len(self.h_list) - 1    # 4
         # layer_num = int(np.log2(shape[2]) - np.log2(minres))
         # self._minres = minres
         # out_ch = minres**2 * depth * 2 ** (layer_num - 1)
-        out_ch = self.h_list[0] * self.w_list[0] * depth * 2 ** (len(self.h_list) - 2)
-        self._embed_size = out_ch
+        out_ch = self.h_list[0] * self.w_list[0] * depth * 2 ** (len(self.h_list) - 2)  # 4 * 4 * 32 * 2^3 = 4096
+        self._embed_size = out_ch   # 4096
 
-        self._linear_layer = nn.Linear(feat_size, out_ch)
+        self._linear_layer = nn.Linear(feat_size, out_ch)   # Linear(1536 -> 4096)
         self._linear_layer.apply(tools.uniform_weight_init(outscale))
-        in_dim = out_ch // (self.h_list[0] * self.w_list[0])
-        out_dim = in_dim // 2
+        in_dim = out_ch // (self.h_list[0] * self.w_list[0])    # 256
+        out_dim = in_dim // 2   # 128
 
         layers = []
         # h, w = minres, minres
         for i in range(layer_num):
             bias = False
             if i == layer_num - 1:
-                out_dim = self._shape[0]
+                out_dim = self._shape[0]    # 1
                 act = False
                 bias = True
                 norm = False
 
             if i != 0:
-                in_dim = 2 ** (layer_num - (i - 1) - 2) * depth
+                in_dim = 2 ** (layer_num - (i - 1) - 2) * depth     # 32 * 2^[2,1,0] = [128, 64, 32]
             # pad_h, outpad_h = self.calc_same_pad(k=kernel_size, s=2, d=1)
             # pad_w, outpad_w = self.calc_same_pad(k=kernel_size, s=2, d=1)
 
@@ -625,7 +663,11 @@ class ConvDecoder(nn.Module):
             out_dim //= 2
             # h, w = h * 2, w * 2
         [m.apply(tools.weight_init) for m in layers[:-1]]
-        layers[-1].apply(tools.uniform_weight_init(outscale))
+        layers[-1].apply(tools.uniform_weight_init(outscale))   # 最后一层做特殊初始化
+        # ConvT(256, 128, 8) --> LayerNorm --> SiLU
+        # ConvT(128, 64, 16) --> LayerNorm --> SiLU
+        # ConvT(64, 32, 32) --> LayerNorm --> SiLU
+        # ConvT(32, 1, 64) --> LayerNorm --> SiLU
         self.layers = nn.Sequential(*layers)
 
     def calc_same_pad(self, k, s, d):
@@ -635,21 +677,21 @@ class ConvDecoder(nn.Module):
         return pad, outpad
 
     def forward(self, features, dtype=None):
-        x = self._linear_layer(features)
-        # (batch, time, -1) -> (batch * time, h, w, ch)
+        x = self._linear_layer(features)    # (batch, time, 1536) ==> (batch, time, 4096)
+        # (batch, time, -1) -> (batch * time, h, w, ch)     ==> (batch * time, 4, 4, 256)
         x = x.reshape(
             [-1, self.h_list[0], self.w_list[0], self._embed_size // (self.h_list[0] * self.w_list[0])]
         )
-        # (batch, time, -1) -> (batch * time, ch, h, w)
+        # (batch, time, -1) -> (batch * time, ch, h, w)     ==> (batch * time, 256, 4, 4)
         x = x.permute(0, 3, 1, 2)
         # print('init decoder shape:', x.shape)
         # for layer in self.layers:
         #     x = layer(x)
         #     print(x.shape)
-        x = self.layers(x)
-        # (batch, time, -1) -> (batch, time, ch, h, w)
+        x = self.layers(x)      # (batch * time, 256, 4, 4)  ==> (batch * time, 1, 64, 64)
+        # (batch, time, -1) -> (batch, time, ch, h, w)          ==> (batch, time, 1, 64, 64)
         mean = x.reshape(features.shape[:-1] + self._shape)
-        # (batch, time, ch, h, w) -> (batch, time, h, w, ch)
+        # (batch, time, ch, h, w) -> (batch, time, h, w, ch)    ==> (batch, time, 64, 64, 1)
         mean = mean.permute(0, 1, 3, 4, 2)
         if self._cnn_sigmoid:
             mean = F.sigmoid(mean)
@@ -661,23 +703,23 @@ class ConvDecoder(nn.Module):
 class MLP(nn.Module):
     def __init__(
         self,
-        inp_dim,
-        shape,
-        layers,
-        units,
+        inp_dim,    # 输入维度: Encoder 33; Decoder 1536; Reward 1536
+        shape,      # Encoder None,无特定输出形状要求; Decoder {"prop": (33,)}; Reward (255,)
+        layers,     # 隐藏层数，Encoder Decoder 5; Reward 2
+        units,      # 每层神经元个数，Encoder Decoder 1024; Reward 512
         act="SiLU",
-        norm=True,
-        dist="normal",
+        norm=True,  # 使用层归一化
+        dist="normal",  # Encoder "normal"; Decoder "symlog_mse"; Reward  "symlog_disc"
         std=1.0,
         min_std=0.1,
         max_std=1.0,
         absmax=None,
         temp=0.1,
         unimix_ratio=0.01,
-        outscale=1.0,
-        symlog_inputs=False,
+        outscale=1.0,   # Encoder Decoder 1.0; Reward 0.0
+        symlog_inputs=False, # Encoder True, 输入使用symlog变换; Decoder False
         device="cuda",
-        name="NoName",
+        name="NoName",  # "Encoder"; "Decoder"; "Reward"
     ):
         super(MLP, self).__init__()
         self._shape = (shape,) if isinstance(shape, int) else shape
@@ -708,9 +750,11 @@ class MLP(nn.Module):
                 inp_dim = units
         self.layers.apply(tools.weight_init)
 
-        if isinstance(self._shape, dict):
+
+        if isinstance(self._shape, dict): # Decoder
             self.mean_layer = nn.ModuleDict()
             for name, shape in self._shape.items():
+                # {"prop": Linear(1024, 33)}
                 self.mean_layer[name] = nn.Linear(inp_dim, np.prod(shape))
             self.mean_layer.apply(tools.uniform_weight_init(outscale))
             if self._std == "learned":
@@ -719,7 +763,8 @@ class MLP(nn.Module):
                 for name, shape in self._shape.items():
                     self.std_layer[name] = nn.Linear(inp_dim, np.prod(shape))
                 self.std_layer.apply(tools.uniform_weight_init(outscale))
-        elif self._shape is not None:
+        elif self._shape is not None: # Reward
+            # Linear(512, 255)
             self.mean_layer = nn.Linear(inp_dim, np.prod(self._shape))
             self.mean_layer.apply(tools.uniform_weight_init(outscale))
             if self._std == "learned":
@@ -729,28 +774,31 @@ class MLP(nn.Module):
 
     def forward(self, features, dtype=None):
         x = features
-        if self._symlog_inputs:
+        if self._symlog_inputs: # Encoder中的 对输入进行symlog变换
             x = tools.symlog(x)
-        out = self.layers(x)
+        out = self.layers(x)    # Encoder：(33,) --> (1024,)； Decoder：(1536,) --> (1024,); Reward: (1536,) --> (512,)
         # Used for encoder output
-        if self._shape is None:
+        if self._shape is None: # Encoder 直接返回 (1024,)
             return out
-        if isinstance(self._shape, dict):
+
+        if isinstance(self._shape, dict): # Decoder
             dists = {}
             for name, shape in self._shape.items():
-                mean = self.mean_layer[name](out)
+                mean = self.mean_layer[name](out)   # (1024,) --> (33,)
                 if self._std == "learned":
                     std = self.std_layer[name](out)
-                else:
+                else:   # 使用固定标准差 1.0
                     std = self._std
+                # {"prop": tools.SymlogDist(mean)}
                 dists.update({name: self.dist(self._dist, mean, std, shape)})
             return dists
-        else:
-            mean = self.mean_layer(out)
+        else: # Reward
+            mean = self.mean_layer(out) # (512) --> (255,)
             if self._std == "learned":
                 std = self.std_layer(out)
             else:
                 std = self._std
+            # tools.DiscDist(mean)
             return self.dist(self._dist, mean, std, self._shape)
 
     def dist(self, dist, mean, std, shape):
@@ -804,8 +852,14 @@ class MLP(nn.Module):
                 )
             )
         elif dist == "symlog_disc":
+            # symlog(x) = sign(x) * log(1 + |x|)
+            # 基于分桶(buckets)的离散概率分布： 将连续值空间离散化为255个桶（-20到20区间），使用神经网络输出的logits预测每个桶的概率，通过加权最近邻桶的方式计算log_prob
+            # 适用于：需要精确建模多峰分布的场景，处理有明确离散特性的数据（如控制指令），当需要避免连续分布的平滑假设时
             dist = tools.DiscDist(logits=mean, device=self._device)
         elif dist == "symlog_mse":
+            # symlog(x) = sign(x) * log(1 + |x|)
+            # 基于MSE的连续值分布： 直接在symlog空间计算均方误差，将大范围数值压缩到较小范围，保持零点的连续性，对接近零的值近似线性，对大值近似对数
+            # 适用于：用于预测连续信号，需要保持数值相对大小的场景，处理动态范围大的传感器数据
             dist = tools.SymlogDist(mean)
         else:
             raise NotImplementedError(dist)

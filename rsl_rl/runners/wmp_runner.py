@@ -90,15 +90,17 @@ class WMPRunner:
 
 
 
-        # 2. 创建 世界模型
+        # 2. 创建 世界模型（包含 Encoder、RSSM、Decoder、奖励预测器）
         self._build_world_model()
 
         # 3. 创建 深度预测器
         self.depth_predictor = DepthPredictor().to(self._world_model.device)
         self.depth_predictor_opt = optim.Adam(self.depth_predictor.parameters(), lr=self.depth_predictor_cfg["lr"],
                                               weight_decay=self.depth_predictor_cfg["weight_decay"])
-
-        self.history_dim = history_length * (self.env.num_obs - self.env.privileged_dim - self.env.height_dim-3) #exclude command
+        # 4. RL
+        # 历史观测维度
+        self.history_dim = history_length * (self.env.num_obs - self.env.privileged_dim - self.env.height_dim - 3) # 5 * (总观测维度285 - 特权观测维度53 - 高度图维度187 - 排除3维的命令(线速度x2 + 角速度)3) = 5 * 42
+        # 4.1 actor - critic 网络：整合世界模型特征，处理历史观测，处理特权观测和高度图
         actor_critic = ActorCriticWMP(num_actor_obs=num_actor_obs,
                                           num_critic_obs=num_critic_obs,
                                           num_actions=self.env.num_actions,
@@ -107,12 +109,15 @@ class WMPRunner:
                                           history_dim=self.history_dim,
                                           wm_feature_dim=self.wm_feature_dim,
                                           **self.policy_cfg).to(self.device)
-
+        # 4.2 对抗运动先验 AMP：用于提高运动自然性
+        # 从预定义的运动文件中加载参考运动数据（动捕数据）
         amp_data = AMPLoader(
             device, time_between_frames=self.env.dt, preload_transitions=True,
             num_preload_transitions=train_cfg['runner']['amp_num_preload_transitions'],
             motion_files=self.cfg["amp_motion_files"])
+        # 数据标准化
         amp_normalizer = Normalizer(amp_data.observation_dim)
+        # 判别器 网络：用于区分策略生成运动与参考运动
         discriminator = AMPDiscriminator(
             amp_data.observation_dim * 2,
             train_cfg['runner']['amp_reward_coef'],
@@ -120,20 +125,23 @@ class WMPRunner:
             train_cfg['runner']['amp_task_reward_lerp']).to(self.device)
 
         # self.discr: AMPDiscriminator = AMPDiscriminator()
+
+        # 4.3 PPO 算法初始化
         alg_class = eval(self.cfg["algorithm_class_name"])  # PPO
         min_std = (
                 torch.tensor(self.cfg["min_normalized_std"], device=self.device) *
                 (torch.abs(self.env.dof_pos_limits[:, 1] - self.env.dof_pos_limits[:, 0])))
+        # 实例化 PPO 算法：整合所有组件进行端到端训练，设置最小动作标准差(min_std)防止过早收敛
         self.alg: PPO = alg_class(actor_critic, discriminator, amp_data, amp_normalizer, device=self.device,
                                   min_std=min_std, **self.alg_cfg)
-        self.num_steps_per_env = self.cfg["num_steps_per_env"]
+        self.num_steps_per_env = self.cfg["num_steps_per_env"]  # 每个 env 迭代的步数 = 24
         self.save_interval = self.cfg["save_interval"]
 
         # init storage and model
         self.alg.init_storage(self.env.num_envs, self.num_steps_per_env, [num_actor_obs],
                               [self.env.num_privileged_obs], [self.env.num_actions], self.history_dim, self.wm_feature_dim)
 
-        # Log
+        # 5. Log
         self.log_dir = log_dir
         self.writer = None
         self.tot_timesteps = 0
@@ -177,14 +185,17 @@ class WMPRunner:
         # 允许 世界模型 和 RL env 在不同的 device 上
         if (self.wm_config.wm_device != 'None'):
             self.wm_config.device = self.wm_config.wm_device
-        self.wm_config.num_actions = self.wm_config.num_actions * self.env.cfg.depth.update_interval
-        prop_dim = self.env.num_obs - self.env.privileged_dim - self.env.height_dim - self.env.num_actions
-        image_shape = self.env.cfg.depth.resized + (1,)
+        self.wm_config.num_actions = self.wm_config.num_actions * self.env.cfg.depth.update_interval    # 12 * 5
+        prop_dim = self.env.num_obs - self.env.privileged_dim - self.env.height_dim - self.env.num_actions  # 本体感知维度 33
+        image_shape = self.env.cfg.depth.resized + (1,) # (64, 64, 1)
+        print(f"[building world_model] prop_shape: {(prop_dim,)}, image shape: {image_shape}")
         obs_shape = {'prop': (prop_dim,), 'image': image_shape,}
 
+        # 3. 创建 世界模型（包含 Encoder、RSSM、Decoder、奖励预测器）
         self._world_model = WorldModel(self.wm_config, obs_shape, use_camera=self.env.cfg.depth.use_camera)
         self._world_model = self._world_model.to(self._world_model.device)
         print('Finish construct world model')
+        # 确定性状态维度，512
         self.wm_feature_dim = self.wm_config.dyn_deter #+ self.wm_config.dyn_stoch * self.wm_config.dyn_discrete
 
 

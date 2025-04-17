@@ -1389,7 +1389,7 @@ class LeggedRobot(BaseTask):
             self.cfg.terrain.curriculum = False
 
         self.max_episode_length_s = self.cfg.env.episode_length_s   # RL训练中每个 episode 的最大持续时间（s）
-        self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)  # RL训练中每个 episode 的 最大仿真步数 = 20 / 0.02 = 1000 步
+        self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)  # RL训练中每个 episode 的 control 仿真步数 = 20 / 0.02 = 1000 步
         self.cfg.domain_rand.push_interval = np.ceil(self.cfg.domain_rand.push_interval_s / self.dt) # 域随机化的 触发步数间隔 = 15 / 0.02 = 750 步
 
     def _draw_debug_vis(self):

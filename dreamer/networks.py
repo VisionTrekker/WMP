@@ -71,7 +71,7 @@ class RSSM(nn.Module):
         self._embed = embed
         self._device = device
 
-        # 1. _img_in_layers: Linear(1036/44 -> 512) --> LayerNorm --> SiLU
+        # 1. _img_in_layers: Linear(1036 -> 512) --> LayerNorm --> SiLU
         inp_layers = []
         if self._discrete:  # 离散情况: 32 * 32 + 12 = 1036
             inp_dim = self._stoch * self._discrete + num_actions
@@ -84,7 +84,7 @@ class RSSM(nn.Module):
         self._img_in_layers = nn.Sequential(*inp_layers)
         self._img_in_layers.apply(tools.weight_init)
 
-        # 2. _cell: GRU单元, Linear(512 + 512 -> 512 * 3) --> LayerNorm
+        # 2. _cell: GRU单元, Linear(512+512 -> 512*3) --> LayerNorm
         self._cell = GRUCell(self._hidden, self._deter, norm=norm)
         self._cell.apply(tools.weight_init)
 
@@ -244,40 +244,33 @@ class RSSM(nn.Module):
 
     def obs_step(self, prev_state, prev_action, embed, is_first, sample=True):
         """
-        执行一步观测更新（世界模型的观测步骤）
-        主要功能：
-        1. 处理初始状态和重置状态
-        2. 通过世界模型预测先验状态
-        3. 结合观测编码更新后验状态
+        执行一步 结合观测的 更新：
+        1. 根据 世界模型前一时间步的 状态 和 action，预测 当前时间步的 先验状态（先验随机状态、先验确定性状态、logit）
+        2. 结合 先验确定性状态 + 世界观测编码特征 更新 当前时间步的 后验状态（后验随机状态、先验确定性状态、logit）
 
         Args:
-            prev_state (dict): 世界模型前一时刻潜在状态，包含:
+            prev_state (dict): 世界模型前一时间步潜在状态，包含:
                 - stoch: 随机状态 (num_envs, 32, 32)
-                - logit: 状态分布参数 (num_envs, 32, 32)
                 - deter: 确定性状态 (num_envs, 512)
-            prev_action (tensor): 前一时刻的 action (num_envs, 12)
+                - logit: 状态分布参数 (num_envs, 32, 32)
+            prev_action (tensor): 前一时间步的 action (num_envs, 12)
             embed (tensor): 世界模型编码特征 (num_envs, 5120)
             is_first (tensor): 是否为 episode 的第一帧 (num_envs,)
             sample (bool): 是否从分布中采样状态，False则取分布众数
-
-        Returns:
-            post (dict): 后验状态（结合观测更新后的状态）
-            prior (dict): 先验状态（仅通过模型预测的状态）
         """
-        # 1. 处理 初始状态 和 action
-        # 如果是全新 episode，则初始化 prev_state、prev_action 为 0 tensor
-        if prev_state == None or torch.sum(is_first) == len(is_first):
+        # 1. 处理 世界模型 状态 和 action
+        if prev_state == None or torch.sum(is_first) == len(is_first): # 如果是全新 episode，则初始化 prev_state、prev_action 为 0 tensor
             prev_state = self.initial(len(is_first))
             prev_action = torch.zeros((len(is_first), self._num_actions)).to(
                 self._device
             )
-        elif torch.sum(is_first) > 0:  # 2. 否则，仅重置 是第一次的env 的 action 和 状态（部分重置）
+        elif torch.sum(is_first) > 0:  # 不是，则保留 不是第一次的env的 action 和 状态
             is_first = is_first[:, None]  # (num_envs, 1)
-            # 仅重置 是第一次 的 env 的 prev_action
+            # (1) 仅重置 是第一次 的 env 的 prev_action
             prev_action *= 1.0 - is_first
-            init_state = self.initial(len(is_first))    # 重置所有 env 的 init_state
 
-            # 仅重置 是第一次 的 env 的 prev_state
+            # (2) 仅重置 是第一次 的 env 的 prev_state
+            init_state = self.initial(len(is_first))    # 重置所有 env 的 init_state
             for key, val in prev_state.items():
                 # 调整is_first的维度以匹配状态维度 (num_envs, 1, 1)
                 is_first_r = torch.reshape(
@@ -288,52 +281,58 @@ class RSSM(nn.Module):
                 prev_state[key] = (
                     val * (1.0 - is_first_r) + init_state[key] * is_first_r
                 )
-        # TODO
-        # 3. 通过世界模型预测先验状态（仅使用动作和之前状态）
+
+        # 2. 通过 世界模型的前一时间步的 状态 和 action 预测 先验状态（当前时间步的 随机状态、确定性状态、logit）
         prior = self.img_step(prev_state, prev_action)
 
-        # 4. 结合观测更新后验状态
-        # 拼接确定性状态和观测编码
-        x = torch.cat([prior["deter"], embed], -1)
-        # 通过MLP处理
-        x = self._obs_out_layers(x)
-        # 获取状态分布参数
-        stats = self._suff_stats_layer("obs", x)
-
-        # 5. 从分布中采样或取众数
-        if sample:
-            stoch = self.get_dist(stats).sample()  # 采样随机状态
-        else:
-            stoch = self.get_dist(stats).mode()  # 取分布众数
-
-        # 6. 构建后验状态（保留确定性状态，更新随机状态）
-        post = {"stoch": stoch, "deter": prior["deter"], **stats}
-        return post, prior
-
-    def img_step(self, prev_state, prev_action, sample=True):
-        # (batch, stoch, discrete_num)
-        prev_stoch = prev_state["stoch"]
-        if self._discrete:
-            shape = list(prev_stoch.shape[:-2]) + [self._stoch * self._discrete]
-            # (batch, stoch, discrete_num) -> (batch, stoch * discrete_num)
-            prev_stoch = prev_stoch.reshape(shape)
-        # (batch, stoch * discrete_num) -> (batch, stoch * discrete_num + action)
-        x = torch.cat([prev_stoch, prev_action], -1)
-        # (batch, stoch * discrete_num + action, embed) -> (batch, hidden)
-        x = self._img_in_layers(x)
-        for _ in range(self._rec_depth):  # rec depth is not correctly implemented
-            deter = prev_state["deter"]
-            # (batch, hidden), (batch, deter) -> (batch, deter), (batch, deter)
-            x, deter = self._cell(x, [deter])
-            deter = deter[0]  # Keras wraps the state in a list.
-        # (batch, deter) -> (batch, hidden)
-        x = self._img_out_layers(x)
-        # (batch, hidden) -> (batch_size, stoch, discrete_num)
-        stats = self._suff_stats_layer("ims", x)
+        # 3. 结合 先验确定性状态 + 观测编码特征 更新 后验随机性状态
+        x = torch.cat([prior["deter"], embed], -1)  # (num_envs, 512+5120)
+        # 经观测输出层处理
+        x = self._obs_out_layers(x)  # (num_envs, 512)
+        # 获取状态分布 logit
+        stats = self._suff_stats_layer("obs", x)  # {"logit": (num_envs, 32, 32)}
         if sample:
             stoch = self.get_dist(stats).sample()
         else:
             stoch = self.get_dist(stats).mode()
+
+        # 4. 构建 后验状态（后验随机状态、先验确定性状态、logit）
+        post = {"stoch": stoch, "deter": prior["deter"], **stats}
+        return post, prior
+
+    def img_step(self, prev_state, prev_action, sample=True):
+        """
+        根据 前一时间步的 状态 和 action 预测 先验状态（下一时间步的 随机状态、确定性状态、其他统计量）
+        """
+        prev_stoch = prev_state["stoch"]  # (num_envs, 32, 32)
+        if self._discrete:  # 离散模式
+            shape = list(prev_stoch.shape[:-2]) + [self._stoch * self._discrete]  # (num_envs, 32*32)
+            prev_stoch = prev_stoch.reshape(shape)  # (num_envs, stoch, discrete_num) -> (num_envs, stoch * discrete_num)
+
+        x = torch.cat([prev_stoch, prev_action], -1) # (num_envs, 32*32+12)
+
+        # 经输入层处理（输入 前一时间步的随机状态 + 前一时间步的action）
+        x = self._img_in_layers(x)  # (num_envs, 512)
+
+        # 经 循环网络（GRU单元）处理（输入 隐藏特征 + 前一时间步的确定性状态）
+        for _ in range(self._rec_depth):  # rec depth is not correctly implemented
+            deter = prev_state["deter"]  # (num_envs, 512)
+            # (num_envs, hidden), (num_envs, deter) -> (num_envs, deter), (num_envs, deter)
+            x, deter = self._cell(x, [deter])  # 经GRU单元更新后的 隐藏特征 x 和  确定性状态 deter
+            deter = deter[0]  # Keras wraps the state in a list.
+
+        # 经输出层处理
+        x = self._img_out_layers(x)  # (num_envs, 512) -> (num_envs, 512)
+
+        # 获取 状态分布 logit
+        stats = self._suff_stats_layer("ims", x)  # {"logit": (num_envs, 32, 32)}
+        # 从 状态分布中 获取 随即状态
+        if sample:  # 采样
+            stoch = self.get_dist(stats).sample()
+        else:  # 众数
+            stoch = self.get_dist(stats).mode()
+
+        # 构建并返回先验状态
         prior = {"stoch": stoch, "deter": deter, **stats}
         return prior
 
@@ -352,7 +351,7 @@ class RSSM(nn.Module):
                 x = self._obs_stat_layer(x)
             else:
                 raise NotImplementedError
-            logit = x.reshape(list(x.shape[:-1]) + [self._stoch, self._discrete])
+            logit = x.reshape(list(x.shape[:-1]) + [self._stoch, self._discrete])  # (num_envs, 32, 32)
             return {"logit": logit}
         else:
             if name == "ims":
@@ -953,8 +952,8 @@ class GRUCell(nn.Module):
 
     def forward(self, inputs, state):
         state = state[0]  # Keras wraps the state in a list.
-        parts = self.layers(torch.cat([inputs, state], -1))
-        reset, cand, update = torch.split(parts, [self._size] * 3, -1)
+        parts = self.layers(torch.cat([inputs, state], -1))  # (num_envs, 3 * 512)
+        reset, cand, update = torch.split(parts, [self._size] * 3, -1)  # 3 个 (num_envs, 512)
         reset = torch.sigmoid(reset)
         cand = self._act(reset * cand)
         update = torch.sigmoid(update + self._update_bias)

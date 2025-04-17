@@ -248,27 +248,27 @@ class WMPRunner:
         # 7. 计算 总迭代次数
         tot_iter = self.current_learning_iteration + num_learning_iterations
 
-        # 8. 初始化 轨迹历史缓冲区
+        # 8. 初始化 轨迹历史 缓冲区 (num_envs, 5, 42)
         self.trajectory_history = torch.zeros(size=(self.env.num_envs, self.history_length,
                                                     self.env.num_obs - self.env.privileged_dim - self.env.height_dim - 3),
                                               device=self.device)
 
-        # 9. 处理初始观测（去除 特权信息、heightmap、command）, (num_envs, 42)
+        # 获取 初始观测（去除 特权信息、heightmap、command）, (num_envs, 42)
         obs_without_command = torch.concat((obs[:, self.env.privileged_dim:self.env.privileged_dim + 6],
                                             obs[:, self.env.privileged_dim + 9:-self.env.height_dim]), dim=1)
-        self.trajectory_history = torch.concat((self.trajectory_history[:, 1:], obs_without_command.unsqueeze(1)),
-                                               dim=1)
+        # 9. 滑动窗口 更新 轨迹历史：丢弃最旧的历史帧、加入新的观测 (num_envs, 5, 42)
+        self.trajectory_history = torch.concat((self.trajectory_history[:, 1:], obs_without_command.unsqueeze(1)), dim=1)
 
         # 10. 初始化 世界模型输入
         sum_wm_dataset_size = 0       # 世界模型 数据集大小
-        wm_latent = wm_action = None  # 世界模型 潜在状态 和 动作
+        wm_latent = wm_action = None  # 世界模型 潜在状态 和 action
         wm_is_first = torch.ones(self.env.num_envs, device=self._world_model.device)  # 标记是否为 episode 开始
 
         # 11. 构建 世界模型观测 dict
         wm_obs = {
             "prop": obs[:, self.env.privileged_dim:self.env.privileged_dim + self.env.cfg.env.prop_dim]
                      .to(self._world_model.device),  # 本体感知特征 (num_envs, 33)
-            "is_first": wm_is_first,  # 是否为 episode 开始 (num_envs,)
+            "is_first": wm_is_first,  # 为 1 表明是 episode 开始 (num_envs,)
         }
 
         if(self.env.cfg.depth.use_camera):  # 如果使用深度相机，则初始化深度图像缓冲区 (num_envs, 64, 64, 1)
@@ -277,13 +277,13 @@ class WMPRunner:
         wm_metrics = None  # 世界模型 训练指标
         self.wm_update_interval = self.env.cfg.depth.update_interval  # 世界模型更新间隔，5 个 timestep, 即 0.1s
 
-        # 12. 初始化 世界模型 action 历史缓冲区 (num_envs, 5, 12)
+        # 12. 初始化 世界模型 action历史 缓冲区 (num_envs, 5, 12)
         wm_action_history = torch.zeros(size=(self.env.num_envs, self.wm_update_interval, self.env.num_actions),
                                         device=self._world_model.device)
         wm_reward = torch.zeros(self.env.num_envs, device=self._world_model.device)  # 世界模型 奖励 (num_envs,)
         wm_feature = torch.zeros((self.env.num_envs, self.wm_feature_dim))  # 世界模型特征 (num_envs, 512)
 
-        # 13. 初始化 世界模型数据集
+        # 13. 初始化 世界模型数据集 wm_dataset 和 wm_buffer 各分量为 0 tensor
         self.init_wm_dataset()
 
         # 14. 训练
@@ -299,16 +299,17 @@ class WMPRunner:
                 for i in range(self.num_steps_per_env):  # 24
                     # 14.2.1 更新 世界模型 状态（每 5 step 更新）
                     if (self.env.global_counter % self.wm_update_interval == 0):
-                        # 世界模型观测 步骤
-                        wm_embed = self._world_model.encoder(wm_obs)    # 世界模型 编码特征 (num_envs, 5120)
-                        # TODO
+                        # 世界模型观测 编码特征 (num_envs, 5120)
+                        wm_embed = self._world_model.encoder(wm_obs)
+                        # 结合世界模型观测的 更新：预测 当前时间步的 后验状态（后验随机状态、先验确定性状态、logit） 和 先验状态
                         wm_latent, _ = self._world_model.dynamics.obs_step(
                             wm_latent, wm_action, wm_embed, wm_obs["is_first"])
+                        # 获取 当前时间步的 确定性状态
                         wm_feature = self._world_model.dynamics.get_deter_feat(wm_latent)
-                        wm_is_first[:] = 0  # 重置起始标记
+                        wm_is_first[:] = 0  # 将起始标记 置为 0
 
-                    # 18. 获取动作并执行环境步骤
-                    history = self.trajectory_history.flatten(1).to(self.device)
+                    # 14.2.2 获取动作并执行环境步骤
+                    history = self.trajectory_history.flatten(1).to(self.device)  # (num_envs, 5*42)
                     actions = self.alg.act(obs, critic_obs, amp_obs, history, wm_feature.to(self.env.device))
                     obs, privileged_obs, rewards, dones, infos, reset_env_ids, terminal_amp_states = self.env.step(actions)
                     next_amp_obs = self.env.get_amp_observations()
@@ -453,16 +454,21 @@ class WMPRunner:
 
     def init_wm_dataset(self):
         self.wm_dataset = {
+            # (num_envs, 1000/5 + 3, 33)
             "prop": torch.zeros((self.env.num_envs, int(self.env.max_episode_length / self.wm_update_interval) + 3, self.env.cfg.env.prop_dim),
                                 device=self._world_model.device),
+            # (num_envs, 1000/5 + 3, 12*5)
             "action": torch.zeros((self.env.num_envs, int(self.env.max_episode_length / self.wm_update_interval) + 3,
                                    self.env.num_actions * self.wm_update_interval), device=self._world_model.device),
+            # (num_envs, 1000/5 + 3)
             "reward": torch.zeros((self.env.num_envs, int(self.env.max_episode_length / self.wm_update_interval) + 3,),
                                   device=self._world_model.device),
         }
         if(self.env.cfg.depth.use_camera):
+            # (1024, 1000/5 + 3, 64, 64, 1)
             self.wm_dataset["image"] = torch.zeros(((self.env.cfg.depth.camera_num_envs, int(self.env.max_episode_length / self.wm_update_interval) + 3,)
                                                + self.env.cfg.depth.resized + (1,)), device=self._world_model.device)
+            # (num_envs, 1000/5 + 3, 525)
             self.wm_dataset["forward_height_map"] = torch.zeros(
                 (self.env.num_envs, int(self.env.max_episode_length / self.wm_update_interval) + 3,
                  self.env.cfg.env.forward_height_dim), device=self._world_model.device)

@@ -75,7 +75,7 @@ class ActorCriticWMP(nn.Module):
         # 285 + 16
         mlp_input_dim_c = num_critic_obs + wm_latent_dim
 
-        # History Encoder: 历史观测特征(42*5维) ==> 潜在特征(32维)
+        # 1. History Encoder: 历史观测特征(42*5维) ==> 潜在特征(32维)
         #   Linear(42*5 -> 256) --> ELU --> Linear(256 -> 128) --> ELU --> Linear(128 -> 32)
         encoder_layers = []
         encoder_layers.append(nn.Linear(history_dim, encoder_hidden_dims[0]))
@@ -88,7 +88,7 @@ class ActorCriticWMP(nn.Module):
                 encoder_layers.append(activation)
         self.history_encoder = nn.Sequential(*encoder_layers)
 
-        # World Model Feature Encoder: 世界模型特征(512维) ==> 潜在特征(16维)
+        # 2. World Model Feature Encoder: 世界模型特征(512维) ==> 潜在特征(16维)
         #   Linear(512 -> 64) --> ELU --> Linear(64 -> 32) --> ELU --> Linear(32 -> 16)
         wm_encoder_layers = []
         wm_encoder_layers.append(nn.Linear(wm_feature_dim, wm_encoder_hidden_dims[0]))
@@ -101,7 +101,7 @@ class ActorCriticWMP(nn.Module):
                 wm_encoder_layers.append(activation)
         self.wm_feature_encoder = nn.Sequential(*wm_encoder_layers)
 
-        # Critic World Model Feature Encoder: 世界模型特征(512维) ==> 潜在特征(16维)
+        # 3. Critic World Model Feature Encoder: 世界模型特征(512维) ==> 潜在特征(16维)
         #   Linear(512 -> 64) --> ELU --> Linear(64 -> 32) --> ELU --> Linear(32 -> 16)
         critic_wm_encoder_layers = []
         critic_wm_encoder_layers.append(nn.Linear(wm_feature_dim, wm_encoder_hidden_dims[0]))
@@ -114,7 +114,7 @@ class ActorCriticWMP(nn.Module):
                 critic_wm_encoder_layers.append(activation)
         self.critic_wm_feature_encoder = nn.Sequential(*critic_wm_encoder_layers)
 
-        # Policy: 历史观测潜在特征(32维) + 命令(3维) + 世界模型潜在特征(16维) ==> 动作(12维)
+        # 4. Policy: 历史观测潜在特征(32维) + 命令(3维) + 世界模型潜在特征(16维) ==> 动作(12维)
         #   Linear(32+3+16 -> 256) --> ELU --> Linear(256 -> 256) --> ELU --> Linear(256 -> 256) --> ELU --> Linear(256 -> 12)
         actor_layers = []
         actor_layers.append(nn.Linear(mlp_input_dim_a, actor_hidden_dims[0]))
@@ -128,7 +128,7 @@ class ActorCriticWMP(nn.Module):
                 actor_layers.append(activation)
         self.actor = nn.Sequential(*actor_layers)
 
-        # Value function: 特权观测特征(285维) + 世界模型潜在特征(16维) ==> 状态价值估计(1维)
+        # 5. Value function: 特权观测特征(285维) + 世界模型潜在特征(16维) ==> 状态价值估计(1维)
         #   Linear(285+16 -> 256) --> ELU --> Linear(256 -> 256) --> ELU --> Linear(256 -> 256) --> ELU --> Linear(256 -> 1)
         critic_layers = []
         critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))

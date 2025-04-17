@@ -41,6 +41,7 @@ class WorldModel(nn.Module):
 
         # 1. encoder: 特征输出维度 (5120,)
         self.encoder = networks.MultiEncoder(obs_shape, **config.encoder, use_camera=use_camera)
+
         # 2. 循环状态空间模型 RSSM
         self.embed_size = self.encoder.outdim   # 5120
         self.dynamics = networks.RSSM(
@@ -60,6 +61,7 @@ class WorldModel(nn.Module):
             self.embed_size,    # 5120
             config.device,
         )
+
         # 3. Decoder 及 奖励预测器
         self.heads = nn.ModuleDict()
         # 计算从 RSSM 输出的特征维度：离散模式下：随机部分(32类别×32维度) + 确定性部分(512维) = 1536维
@@ -67,13 +69,15 @@ class WorldModel(nn.Module):
             feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:
             feat_size = config.dyn_stoch + config.dyn_deter
+
         # 3.1 Decoder: 使用MSE损失重建 深度图像 (64, 64, 1) ，适用symbol_mse处理 本体感知数据 (33,)
-        # 输出 {"images": MSEDist(out_cnn), "prop": SymlogDist(out_mlp)}
+        #   输出 {"images": MSEDist(out_cnn), "prop": SymlogDist(out_mlp)}
         self.heads["decoder"] = networks.MultiDecoder(
             feat_size, obs_shape, **config.decoder, use_camera=use_camera
         )
+
         # 3.2 Reward: 使用离散分布预测奖励值(255个分桶), 并经过symlog变换处理
-        # 输出 DiscDist(out)
+        #   输出 DiscDist(out)
         self.heads["reward"] = networks.MLP(
             feat_size,
             (255,) if config.reward_head["dist"] == "symlog_disc" else (),
@@ -115,6 +119,7 @@ class WorldModel(nn.Module):
         print(
             f"Optimizer model_opt has {sum(param.numel() for param in self.parameters())} variables."
         )
+
         # 5. 设置 损失权重 （奖励 0.0, image 1.0）
         # other losses are scaled by 1.0.
         # can set different scale for terms in decoder here

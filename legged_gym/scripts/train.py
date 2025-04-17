@@ -53,10 +53,13 @@ def train(args):
 
     train_cfg.runner.max_iterations = 20000
     train_cfg.runner.save_interval = 500
-    # 2. 创建 env（即 LeggedRobot 对象）
+
+    # 2. 创建 env（即 LeggedRobot 实例）
     env, env_cfg = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
-    # 3. 创建训练器
+
+    # 3. 创建 runner（即 WMPRunner 实例，包含 世界模型、深度预测器、Actor-Critic 网络、对抗运动先验 AMP、PPO 算法、重置所有机器人）
     ppo_runner, train_cfg = task_registry.make_wmp_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
+
     # 4. 执行训练
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 

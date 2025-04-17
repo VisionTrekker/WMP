@@ -43,7 +43,7 @@ class RSSM(nn.Module):
         deter=200,  # 确定性状态维度，512
         hidden=200, # 隐藏层维度，512
         rec_depth=1,    # 1
-        discrete=False, # 离散状态数，32
+        discrete=False, # 离散类别数，32
         act="SiLU",
         norm=True,
         mean_act="none",
@@ -109,7 +109,7 @@ class RSSM(nn.Module):
         self._obs_out_layers.apply(tools.weight_init)
 
 
-        if self._discrete:  # 离散
+        if self._discrete:  # 离散模式
             # 5. _imgs_stat_layer: Linear(512 -> 32 * 32 = 1024)
             self._imgs_stat_layer = nn.Linear(
                 self._hidden, self._stoch * self._discrete
@@ -118,7 +118,7 @@ class RSSM(nn.Module):
             # 6. _obs_stat_layer: Linear(512 -> 32 * 32 = 1024)
             self._obs_stat_layer = nn.Linear(self._hidden, self._stoch * self._discrete)
             self._obs_stat_layer.apply(tools.uniform_weight_init(1.0))
-        else:   # 连续
+        else:   # 连续模式
             self._imgs_stat_layer = nn.Linear(self._hidden, 2 * self._stoch)
             self._imgs_stat_layer.apply(tools.uniform_weight_init(1.0))
             self._obs_stat_layer = nn.Linear(self._hidden, 2 * self._stoch)
@@ -132,28 +132,57 @@ class RSSM(nn.Module):
             )
 
     def initial(self, batch_size):
-        deter = torch.zeros(batch_size, self._deter).to(self._device)
-        if self._discrete:
+        """
+        初始化 世界模型的 潜在状态
+
+        主要功能：
+        1. 创建全零初始状态（确定性状态和随机状态）
+        2. 根据配置选择初始化方式（零初始化或学习初始化）
+
+        Args:
+            batch_size: num_envs
+
+        Returns:
+            state (dict): 包含以下键的字典：
+                - deter: 确定性状态 (num_envs, 512)
+                - 随机状态相关键（根据离散/连续配置不同）：
+                    * 离散模式：logit, stoch (num_envs, 32, 32)
+                    * 连续模式：mean, std, stoch (num_envs, 32)
+        注意：
+        - 离散模式下，随机状态 被建模为分类分布（32个类别）
+        - 连续模式下，随机状态被建模为高斯分布
+        """
+        # 1. 初始化 确定性状态（全零张量）
+        deter = torch.zeros(batch_size, self._deter).to(self._device)   # 确定性状态 (num_envs, 512)
+        # 2. 根据离散/连续模式 初始化随机状态
+        if self._discrete:  # 默认离散模式（32个类别）
             state = dict(
+                # logits用于分类分布参数 (num_envs, 32, 32)
                 logit=torch.zeros([batch_size, self._stoch, self._discrete]).to(
                     self._device
                 ),
+                # 随机状态（采样结果）(num_envs, 32, 32)
                 stoch=torch.zeros([batch_size, self._stoch, self._discrete]).to(
                     self._device
                 ),
+                # 确定性状态 (num_envs, 512)
                 deter=deter,
             )
-        else:
+        else:  # 连续模式
+            # 连续状态使用高斯分布，需要均值和标准差
             state = dict(
-                mean=torch.zeros([batch_size, self._stoch]).to(self._device),
-                std=torch.zeros([batch_size, self._stoch]).to(self._device),
-                stoch=torch.zeros([batch_size, self._stoch]).to(self._device),
-                deter=deter,
+                mean=torch.zeros([batch_size, self._stoch]).to(self._device),   # 均值 (num_envs, 32)
+                std=torch.zeros([batch_size, self._stoch]).to(self._device),    # 标准差 (num_envs, 32)
+                stoch=torch.zeros([batch_size, self._stoch]).to(self._device),  # 采样结果 (num_envs, 32)
+                deter=deter,  # 确定性状态 (num_envs, 512)
             )
-        if self._initial == "zeros":
+        # 3. 根据初始化策略处理状态
+        if self._initial == "zeros":  # 零初始化
             return state
-        elif self._initial == "learned":
+        elif self._initial == "learned":  # 默认 学习初始化
+            # 使用学习到的参数初始化 确定性状态
             state["deter"] = torch.tanh(self.W).repeat(batch_size, 1)
+            # 从 确定性状态 生成 随机状态
             state["stoch"] = self.get_stoch(state["deter"])
             return state
         else:
@@ -198,8 +227,11 @@ class RSSM(nn.Module):
         return state["deter"]
 
     def get_dist(self, state, dtype=None):
-        if self._discrete:
-            logit = state["logit"]
+        """ 获取分布对象 """
+        if self._discrete:  # 离散模式
+            logit = state["logit"]  # (num_envs, 32, 32)
+            # tools.OneHotDist(): 创建一个基于logits的one-hot分类分布, 每个32x32矩阵表示32个随机状态维度，每个维度有32个类别的分类分布
+            # torchd.independent.Independent(..., 1): 将最后1个维度（即32个类别）视为事件维度, 使得最终分布有32个独立事件（对应32个随机状态维度）
             dist = torchd.independent.Independent(
                 tools.OneHotDist(logit, unimix_ratio=self._unimix_ratio), 1
             )
@@ -211,36 +243,70 @@ class RSSM(nn.Module):
         return dist
 
     def obs_step(self, prev_state, prev_action, embed, is_first, sample=True):
-        # initialize all prev_state
+        """
+        执行一步观测更新（世界模型的观测步骤）
+        主要功能：
+        1. 处理初始状态和重置状态
+        2. 通过世界模型预测先验状态
+        3. 结合观测编码更新后验状态
+
+        Args:
+            prev_state (dict): 世界模型前一时刻潜在状态，包含:
+                - stoch: 随机状态 (num_envs, 32, 32)
+                - logit: 状态分布参数 (num_envs, 32, 32)
+                - deter: 确定性状态 (num_envs, 512)
+            prev_action (tensor): 前一时刻的 action (num_envs, 12)
+            embed (tensor): 世界模型编码特征 (num_envs, 5120)
+            is_first (tensor): 是否为 episode 的第一帧 (num_envs,)
+            sample (bool): 是否从分布中采样状态，False则取分布众数
+
+        Returns:
+            post (dict): 后验状态（结合观测更新后的状态）
+            prior (dict): 先验状态（仅通过模型预测的状态）
+        """
+        # 1. 处理 初始状态 和 action
+        # 如果是全新 episode，则初始化 prev_state、prev_action 为 0 tensor
         if prev_state == None or torch.sum(is_first) == len(is_first):
             prev_state = self.initial(len(is_first))
             prev_action = torch.zeros((len(is_first), self._num_actions)).to(
                 self._device
             )
-        # overwrite the prev_state only where is_first=True
-        elif torch.sum(is_first) > 0:
-            is_first = is_first[:, None]
+        elif torch.sum(is_first) > 0:  # 2. 否则，仅重置 是第一次的env 的 action 和 状态（部分重置）
+            is_first = is_first[:, None]  # (num_envs, 1)
+            # 仅重置 是第一次 的 env 的 prev_action
             prev_action *= 1.0 - is_first
-            init_state = self.initial(len(is_first))
+            init_state = self.initial(len(is_first))    # 重置所有 env 的 init_state
+
+            # 仅重置 是第一次 的 env 的 prev_state
             for key, val in prev_state.items():
+                # 调整is_first的维度以匹配状态维度 (num_envs, 1, 1)
                 is_first_r = torch.reshape(
                     is_first,
                     is_first.shape + (1,) * (len(val.shape) - len(is_first.shape)),
                 )
+                # 新状态 = 旧状态 * (1 - is_first) + 新初始状态 * is_first = 不是第一次的env 旧状态 + 是第一次的env的 0 tensor
                 prev_state[key] = (
                     val * (1.0 - is_first_r) + init_state[key] * is_first_r
                 )
-
+        # TODO
+        # 3. 通过世界模型预测先验状态（仅使用动作和之前状态）
         prior = self.img_step(prev_state, prev_action)
+
+        # 4. 结合观测更新后验状态
+        # 拼接确定性状态和观测编码
         x = torch.cat([prior["deter"], embed], -1)
-        # (batch_size, prior_deter + embed) -> (batch_size, hidden)
+        # 通过MLP处理
         x = self._obs_out_layers(x)
-        # (batch_size, hidden) -> (batch_size, stoch, discrete_num)
+        # 获取状态分布参数
         stats = self._suff_stats_layer("obs", x)
+
+        # 5. 从分布中采样或取众数
         if sample:
-            stoch = self.get_dist(stats).sample()
+            stoch = self.get_dist(stats).sample()  # 采样随机状态
         else:
-            stoch = self.get_dist(stats).mode()
+            stoch = self.get_dist(stats).mode()  # 取分布众数
+
+        # 6. 构建后验状态（保留确定性状态，更新随机状态）
         post = {"stoch": stoch, "deter": prior["deter"], **stats}
         return post, prior
 
@@ -272,15 +338,16 @@ class RSSM(nn.Module):
         return prior
 
     def get_stoch(self, deter):
-        x = self._img_out_layers(deter)
-        stats = self._suff_stats_layer("ims", x)
+        # 从 deter 生成 stoch
+        x = self._img_out_layers(deter)  # (num_envs, 512) ==> (num_envs, 512)
+        stats = self._suff_stats_layer("ims", x)  # {"logit": (num_envs, 32, 32)}
         dist = self.get_dist(stats)
-        return dist.mode()
+        return dist.mode()  # 从每个 env 的32个随机状态, 选择logit值最大的类别索引 (num_envs, 32, 32)
 
     def _suff_stats_layer(self, name, x):
-        if self._discrete:
+        if self._discrete:  # 离散模式
             if name == "ims":
-                x = self._imgs_stat_layer(x)
+                x = self._imgs_stat_layer(x)  # (num_envs, 1024)
             elif name == "obs":
                 x = self._obs_stat_layer(x)
             else:
@@ -404,15 +471,15 @@ class MultiEncoder(nn.Module):
     def forward(self, obs):
         outputs = []
         if self.cnn_shapes:
-            if(self.use_camera):
+            if(self.use_camera):  # 使用深度相机，则输入为 深度图 (num_envs, 64, 64, 1), 输出 (num_envs, 4096)
                 inputs = torch.cat([obs[k] for k in self.cnn_shapes], -1)
                 outputs.append(self._cnn(inputs))
-            else:
+            else:  # 不使用深度图，则输出为 0 tensor (num_envs, 4096)
                 outputs.append(torch.zeros((obs["is_first"].shape + (self._cnn.outdim,)), device=obs["is_first"].device))
-        if self.mlp_shapes:
+        if self.mlp_shapes: # (num_envs, 33) ==> (num_envs, 1024)
             inputs = torch.cat([obs[k] for k in self.mlp_shapes], -1)
             outputs.append(self._mlp(inputs))
-        outputs = torch.cat(outputs, -1)    # (batch, time, 5120)
+        outputs = torch.cat(outputs, -1)    # (num_envs, 5120)
         return outputs
 
 

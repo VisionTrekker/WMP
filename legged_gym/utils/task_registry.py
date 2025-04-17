@@ -212,7 +212,7 @@ class TaskRegistry():
         # 3. 创建 runner，WMPRunner 实例（在 rsl_rl/runners/wmp_runner.py 内）
         runner = WMPRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
 
-        # 4. 若启用了 resume，则加载之前训练的模型 (logs/experiment_name/load_run/model_xxx.pt)
+        # 4. 若启用了 resume，则加载之前训练的模型 (logs/experiment_name/load_run/model_xxx.pt) 中的 Actor-Critic网络参数、Actor-Critic优化器参数、世界模型参数、迭代次数
         #save resume path before creating a new log_dir
         resume = train_cfg.runner.resume
         if resume:

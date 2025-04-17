@@ -148,7 +148,7 @@ class AliengoAMPCfg(LeggedRobotCfg):
         z_angle = [0, 0]
         x_angle = [0, 0]
 
-        update_interval = 5  # 5 works without retraining, 8 worse
+        update_interval = 5  # 世界模型更新间隔，5 个 timestep, 即 0.1s. works without retraining, 8 worse
 
         original = (64, 64)
         resized = (64, 64)

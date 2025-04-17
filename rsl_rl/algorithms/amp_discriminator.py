@@ -39,13 +39,18 @@ from rsl_rl.utils import utils
 
 class AMPDiscriminator(nn.Module):
     def __init__(
-            self, input_dim, amp_reward_coef, hidden_layer_sizes, device, task_reward_lerp=0.0):
+            self, input_dim,  # amp_data.observation_dim * 2
+            amp_reward_coef,  # 0.5 * 0.02
+            hidden_layer_sizes,  # [1024, 512]
+            device,
+            task_reward_lerp=0.0):  # 0.3
         super(AMPDiscriminator, self).__init__()
 
         self.device = device
         self.input_dim = input_dim
 
         self.amp_reward_coef = amp_reward_coef
+        # Linear(observation_dim * 2 -> 1024) --> ReLU --> Linear(1024 -> 512) --> ReLU
         amp_layers = []
         curr_in_dim = input_dim
         for hidden_dim in hidden_layer_sizes:
@@ -53,6 +58,7 @@ class AMPDiscriminator(nn.Module):
             amp_layers.append(nn.ReLU())
             curr_in_dim = hidden_dim
         self.trunk = nn.Sequential(*amp_layers).to(device)
+        # Linear(512 -> 1)
         self.amp_linear = nn.Linear(hidden_layer_sizes[-1], 1).to(device)
 
         self.trunk.train()

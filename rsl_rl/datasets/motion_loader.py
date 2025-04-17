@@ -45,28 +45,28 @@ class AMPLoader:
     TAR_TOE_VEL_LOCAL_SIZE = 12  # 足端目标速度
 
     # 定义各运动参数在数据数组中的索引范围
-    ROOT_POS_START_IDX = 0  # 根位置起始索引
-    ROOT_POS_END_IDX = ROOT_POS_START_IDX + POS_SIZE  # 根位置结束索引
+    ROOT_POS_START_IDX = 0  # 根位置 起始索引
+    ROOT_POS_END_IDX = ROOT_POS_START_IDX + POS_SIZE  # 根位置 结束索引
 
-    ROOT_ROT_START_IDX = ROOT_POS_END_IDX
+    ROOT_ROT_START_IDX = ROOT_POS_END_IDX  # 根旋转
     ROOT_ROT_END_IDX = ROOT_ROT_START_IDX + ROT_SIZE
 
-    JOINT_POSE_START_IDX = ROOT_ROT_END_IDX
+    JOINT_POSE_START_IDX = ROOT_ROT_END_IDX  # 关节位置
     JOINT_POSE_END_IDX = JOINT_POSE_START_IDX + JOINT_POS_SIZE
 
-    TAR_TOE_POS_LOCAL_START_IDX = JOINT_POSE_END_IDX
+    TAR_TOE_POS_LOCAL_START_IDX = JOINT_POSE_END_IDX  # 足端目标位置
     TAR_TOE_POS_LOCAL_END_IDX = TAR_TOE_POS_LOCAL_START_IDX + TAR_TOE_POS_LOCAL_SIZE
 
-    LINEAR_VEL_START_IDX = TAR_TOE_POS_LOCAL_END_IDX
+    LINEAR_VEL_START_IDX = TAR_TOE_POS_LOCAL_END_IDX  # 线速度
     LINEAR_VEL_END_IDX = LINEAR_VEL_START_IDX + LINEAR_VEL_SIZE
 
-    ANGULAR_VEL_START_IDX = LINEAR_VEL_END_IDX
+    ANGULAR_VEL_START_IDX = LINEAR_VEL_END_IDX  # 角速度
     ANGULAR_VEL_END_IDX = ANGULAR_VEL_START_IDX + ANGULAR_VEL_SIZE
 
-    JOINT_VEL_START_IDX = ANGULAR_VEL_END_IDX
+    JOINT_VEL_START_IDX = ANGULAR_VEL_END_IDX  # 关节速度
     JOINT_VEL_END_IDX = JOINT_VEL_START_IDX + JOINT_VEL_SIZE
 
-    TAR_TOE_VEL_LOCAL_START_IDX = JOINT_VEL_END_IDX
+    TAR_TOE_VEL_LOCAL_START_IDX = JOINT_VEL_END_IDX  # 足端目标速度
     TAR_TOE_VEL_LOCAL_END_IDX = TAR_TOE_VEL_LOCAL_START_IDX + TAR_TOE_VEL_LOCAL_SIZE
 
     def __init__(
@@ -88,21 +88,22 @@ class AMPLoader:
         self.trajectories = []      # 存储处理后的轨迹数据(不含根位置和旋转)
         self.trajectories_full = [] # 存储完整的轨迹数据
         self.trajectory_names = []  # 轨迹名称列表
-        self.trajectory_idxs = []
-        self.trajectory_lens = []  # Traj length in seconds.
-        self.trajectory_weights = []
-        self.trajectory_frame_durations = []
-        self.trajectory_num_frames = []
+        self.trajectory_idxs = []   # 轨迹索引列表
+        self.trajectory_lens = []   # 轨迹长度(秒)
+        self.trajectory_weights = []  # 轨迹权重
+        self.trajectory_frame_durations = []  # 每帧持续时间
+        self.trajectory_num_frames = []  # 每轨迹帧数
 
+        # 加载每个运动文件
         for i, motion_file in enumerate(motion_files):
             self.trajectory_names.append(motion_file.split('.')[0])
             with open(motion_file, "r") as f:
                 motion_json = json.load(f)
                 motion_data = np.array(motion_json["Frames"])
-                #reorder is needed only if using the real animal's data
+                # 仅在使用真实动物数据时需要重排
                 # motion_data = self.reorder_from_pybullet_to_isaac(motion_data)
 
-                # Normalize and standardize quaternions.
+                # 标准化和规范化 四元数
                 for f_i in range(motion_data.shape[0]):
                     root_rot = AMPLoader.get_root_rot(motion_data[f_i])
                     # root_rot = pose3d.QuaternionNormalize(root_rot)
@@ -113,7 +114,7 @@ class AMPLoader:
                             (AMPLoader.POS_SIZE +
                              AMPLoader.ROT_SIZE)] = root_rot
                 
-                # Remove first 7 observation dimensions (root_pos and root_orn).
+                # 移除前7个观测维度 (根位置 和 旋转)
                 self.trajectories.append(torch.tensor(
                     motion_data[
                         :,
@@ -133,13 +134,13 @@ class AMPLoader:
 
             print(f"Loaded {traj_len}s. motion from {motion_file}.")
         
-        # Trajectory weights are used to sample some trajectories more than others.
+        # 轨迹权重用于对不同轨迹进行加权采样
         self.trajectory_weights = np.array(self.trajectory_weights) / np.sum(self.trajectory_weights)
         self.trajectory_frame_durations = np.array(self.trajectory_frame_durations)
         self.trajectory_lens = np.array(self.trajectory_lens)
         self.trajectory_num_frames = np.array(self.trajectory_num_frames)
 
-        # Preload transitions.
+        # 预加载 转换数据
         self.preload_transitions = preload_transitions
         if self.preload_transitions:
             print(f'Preloading {num_preload_transitions} transitions')
@@ -149,12 +150,12 @@ class AMPLoader:
             self.preloaded_s_next = self.get_full_frame_at_time_batch(traj_idxs, times + self.time_between_frames)
             print(f'Finished preloading')
 
-
+        # 将所有完整轨迹数据堆叠起来
         self.all_trajectories_full = torch.vstack(self.trajectories_full)
 
     def reorder_from_pybullet_to_isaac(self, motion_data):
         """
-        关节顺序： PyBullet [FR,FL,RR,RL] ==> IsaacGym [FL,FR,RL,RR]
+        关节顺序转换： PyBullet [FR,FL,RR,RL] ==> IsaacGym [FL,FR,RL,RR]
         """
         # 获取各运动参数
         root_pos = AMPLoader.get_root_pos_batch(motion_data)
@@ -184,37 +185,71 @@ class AMPLoader:
              joint_vel, foot_vel])
 
     def weighted_traj_idx_sample(self):
-        """Get traj idx via weighted sampling."""
+        """根据 轨迹权重 随机采样一个 轨迹索引"""
         return np.random.choice(
             self.trajectory_idxs, p=self.trajectory_weights)
 
     def weighted_traj_idx_sample_batch(self, size):
-        """Batch sample traj idxs."""
+        """批量采样轨迹索引
+        参数:
+            size: 需要采样的数量
+        返回:
+            采样得到的轨迹索引数组
+        """
         return np.random.choice(
             self.trajectory_idxs, size=size, p=self.trajectory_weights,
             replace=True)
 
     def traj_time_sample(self, traj_idx):
-        """Sample random time for traj."""
+        """在 指定轨迹中 随机采样一个 时间点
+        参数:
+            traj_idx: 轨迹索引
+        返回:
+            采样得到的时间点(秒)
+        """
         subst = self.time_between_frames + self.trajectory_frame_durations[traj_idx]
         return max(
             0, (self.trajectory_lens[traj_idx] * np.random.uniform() - subst))
 
     def traj_time_sample_batch(self, traj_idxs):
-        """Sample random time for multiple trajectories."""
+        """批量采样 轨迹时间点
+        参数:
+            traj_idxs: 轨迹索引数组
+        返回:
+            对应每个轨迹的采样时间点数组
+        """
         subst = self.time_between_frames + self.trajectory_frame_durations[traj_idxs]
         time_samples = self.trajectory_lens[traj_idxs] * np.random.uniform(size=len(traj_idxs)) - subst
         return np.maximum(np.zeros_like(time_samples), time_samples)
 
     def slerp(self, val0, val1, blend):
+        """线性插值
+        参数:
+            val0: 起始值
+            val1: 结束值
+            blend: 插值比例(0-1)
+        返回:
+            插值结果
+        """
         return (1.0 - blend) * val0 + blend * val1
 
     def get_trajectory(self, traj_idx):
-        """Returns trajectory of AMP observations."""
+        """获取 AMP 观测的 完整轨迹数据
+        参数:
+            traj_idx: 轨迹索引
+        返回:
+            完整的轨迹数据张量
+        """
         return self.trajectories_full[traj_idx]
 
     def get_frame_at_time(self, traj_idx, time):
-        """Returns frame for the given trajectory at the specified time."""
+        """获取 指定轨迹 在特定时间的帧数据(不含根位置和旋转)
+        参数:
+            traj_idx: 轨迹索引
+            time: 时间点(秒)
+        返回:
+            插值后的帧数据
+        """
         p = float(time) / self.trajectory_lens[traj_idx]
         n = self.trajectories[traj_idx].shape[0]
         idx_low, idx_high = int(np.floor(p * n)), int(np.ceil(p * n))
@@ -224,7 +259,13 @@ class AMPLoader:
         return self.slerp(frame_start, frame_end, blend)
 
     def get_frame_at_time_batch(self, traj_idxs, times):
-        """Returns frame for the given trajectory at the specified time."""
+        """批量获取帧数据(不含根位置和旋转)
+        参数:
+            traj_idxs: 轨迹索引数组
+            times: 时间点数组
+        返回:
+            批量插值后的帧数据
+        """
         p = times / self.trajectory_lens[traj_idxs]
         n = self.trajectory_num_frames[traj_idxs]
         idx_low, idx_high = np.floor(p * n).astype(np.int), np.ceil(p * n).astype(np.int)
@@ -239,7 +280,13 @@ class AMPLoader:
         return self.slerp(all_frame_starts, all_frame_ends, blend)
 
     def get_full_frame_at_time(self, traj_idx, time):
-        """Returns full frame for the given trajectory at the specified time."""
+        """获取完整帧数据(包含根位置和旋转)
+        参数:
+            traj_idx: 轨迹索引
+            time: 时间点(秒)
+        返回:
+            插值后的完整帧数据
+        """
         p = float(time) / self.trajectory_lens[traj_idx]
         n = self.trajectories_full[traj_idx].shape[0]
         idx_low, idx_high = int(np.floor(p * n)), int(np.ceil(p * n))
@@ -249,6 +296,13 @@ class AMPLoader:
         return self.blend_frame_pose(frame_start, frame_end, blend)
 
     def get_full_frame_at_time_batch(self, traj_idxs, times):
+        """批量获取完整帧数据
+        参数:
+            traj_idxs: 轨迹索引数组
+            times: 时间点数组
+        返回:
+            批量插值后的完整帧数据
+        """
         p = times / self.trajectory_lens[traj_idxs]
         n = self.trajectory_num_frames[traj_idxs]
         idx_low, idx_high = np.floor(p * n).astype(np.int), np.ceil(p * n).astype(np.int)
@@ -297,13 +351,13 @@ class AMPLoader:
             return self.get_full_frame_at_time_batch(traj_idxs, times)
 
     def blend_frame_pose(self, frame0, frame1, blend):
-        """Linearly interpolate between two frames, including orientation.
+        """在两个运动帧(frame0和frame1)之间进行线性插值
+            包括: 位置、旋转、关节状态、足端位置、线速度、角速度等所有运动参数
 
         Args:
             frame0: First frame to be blended corresponds to (blend = 0).
             frame1: Second frame to be blended corresponds to (blend = 1).
-            blend: Float between [0, 1], specifying the interpolation between
-            the two frames.
+            blend: Float between [0, 1], specifying the interpolation between the two frames.
         Returns:
             An interpolation of the two frames.
         """

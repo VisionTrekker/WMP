@@ -143,7 +143,7 @@ class LeggedRobot(BaseTask):
 
         self.global_counter = 0  # 全局步数计数器
         self.total_env_steps_counter = 0  # 总 env steps
-        # domain randomization 中的 动作延迟范围 [0, 2]（/ 物理仿真步长(0.005 s/步)，即从 秒 ==> 步数）
+        # domain randomization 中的 动作延迟范围 [0, 2]步（/ 物理仿真步长(0.005 s/步)，即从 秒 ==> 步数）
         self.latency_range = [int((self.cfg.domain_rand.latency_range[0] + 1e-8) / self.sim_params.dt),
                                  int((self.cfg.domain_rand.latency_range[1] - 1e-8) / self.sim_params.dt) + 1]
 
@@ -166,81 +166,101 @@ class LeggedRobot(BaseTask):
                 torch.arange(self.num_envs, device=self.device),
                 self.obs_buf[torch.arange(self.num_envs, device=self.device)])
 
-        # 3. 执行一步 0 action 来获取 初始观测状态
+        # 3. 执行一步 0 action 来获取 初始观测（obs_buf, privileged_obs_buf）
         obs, privileged_obs, _, _, _, _, _ = self.step(
             torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
         return obs, privileged_obs
 
     def step(self, actions):
         """
-        应用 action 并执行一步仿真
+        执行 env step： 根据 Policy输出的 actions 并执行一步仿真
+
+        Args:
             actions (torch.Tensor): (num_envs, 12)
+
+        Returns:
+            obs_bug: (num_envs, 285)
+            privileged_obs_buf: (num_envs, 30)
+            rew_buf: 所有env的 奖励之和 (num_envs,)
+            reset_buf： 所有env的 重置标记 (num_envs,)
+            extras： 额外信息，包含
+                - episode: 回合统计信息（各奖励项均值等）
+                - depth: 深度图像（如果启用相机）
+                - time_outs: 超时标志
+            reset_env_ids： 需要重置的env的 ID (num_envs_,)
+            terminal_amp_states： 需要重置的env的 AMP观测 (num_envs_, 30)
         """
-        # 1. 更新全局步数计数器
+        # 1. 更新 全局步数计数器
         self.global_counter += 1
         self.total_env_steps_counter += 1
 
-        # 2. 处理 actions 输入（裁剪、延迟等）
-        # 裁剪动作到合法范围
-        clip_actions = self.cfg.normalization.clip_actions
+        # 2. 处理 actions
+        # (1) 裁剪到合理范围 [-6.0, 6.0]
+        clip_actions = self.cfg.normalization.clip_actions  # 6.0
         self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
 
-        # 动作延迟处理（域随机化）
-        rng = self.latency_range
+        # (2) 计算 action 域随机化延迟步数 0/1/2
+        rng = self.latency_range  # [0, 2]步
         action_latency = random.randint(rng[0], rng[1])
 
         # 3. 渲染环境（非headless模式）
         self.render()
 
-        # 4. 执行物理仿真（分多步进行）
-        for _ in range(self.cfg.control.decimation):  # 4
-            # 应用动作延迟（如果启用）
+        # 4. 执行一个 control 步（包含 4 个物理仿真步）
+        for _ in range(self.cfg.control.decimation):
+            # 从 actions 计算 扭矩 (num_envs, 12)
             if (self.cfg.domain_rand.randomize_action_latency and _ < action_latency):
+                # 如果启用延迟，则在前3次中可能使用 上一control步的actions，在最后1次使用当前action
                 self.torques = self._compute_torques(self.last_actions).view(self.torques.shape)
             else:
                 self.torques = self._compute_torques(self.actions).view(self.torques.shape)
 
-            # 电机强度随机化（域随机化）
+            # 扭矩域随机化（扭矩 * 0.8-1.2的随机系数）
             if(self.cfg.domain_rand.randomize_motor_strength):
-                rng = self.cfg.domain_rand.motor_strength_range
+                rng = self.cfg.domain_rand.motor_strength_range  # [0.8, 1.2]
                 self.torques = self.torques * torch_rand_float(rng[0], rng[1], self.torques.shape, device=self.device)
 
-            # 应用计算得到的扭矩到仿真环境
+            # 应用 该扭矩 到 仿真环境
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(self.torques))
-            self.gym.simulate(self.sim)
+            self.gym.simulate(self.sim)  # 执行物理仿真
             # if self.device == 'cpu':
-            self.gym.fetch_results(self.sim, True)
-            self.gym.refresh_dof_state_tensor(self.sim)
+            self.gym.fetch_results(self.sim, True)  # 获取仿真结果
+            self.gym.refresh_dof_state_tensor(self.sim)  # 更新 关节状态
 
-        # 5. 处理物理步后的逻辑（奖励、观测等）
-        # 执行物理步后的处理（奖励计算、终止判断等）
+        # 5. 执行 4个物理仿真步后的 操作
+        # (1) 计算 奖励
+        # (2) 计算 新的观测（privileged_obs_buf 和 obs_buf，都是 (num_envs, 285)）
+        # (3) 重置某些env 获取它们的AMP观测
+        # (4) 更新 depth_buffer
+        # (5) 更新上一control步的数据（action、关节位置、关节速度、扭矩、base的线速度和角速度）
+        #   返回： 需要重置的env的 ID (num_envs_,) 以及这些 env 的 AMP观测 (num_envs_, 30)
         reset_env_ids, terminal_amp_states = self.post_physics_step()
 
-        # 裁剪观测值到合法范围
+        # 5.1 裁剪 观测obs_buf 到 [-100., 100.]
         clip_obs = self.cfg.normalization.clip_observations
         self.obs_buf = torch.clip(self.obs_buf, -clip_obs, clip_obs)
 
-        # 处理历史观测（如果需要）
+        # 5.2 获取 策略观测policy_obs
         if self.cfg.env.include_history_steps is not None:
+            # 如果启用历史观测，则将当前观测插入到历史缓冲区中，并加载 多个历史观测 作为策略观测
             self.obs_buf_history.reset(reset_env_ids, self.obs_buf[reset_env_ids])
             self.obs_buf_history.insert(self.obs_buf)
             policy_obs = self.obs_buf_history.get_obs_vec(np.arange(self.include_history_steps))
-        else:
+        else:  # 默认
             policy_obs = self.obs_buf
 
-        # 裁剪特权观测（如果有）
+        # 5.3 裁剪 特权观测privileged_obs_buf 到 [-100., 100.]
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
 
-        # 处理深度图像（如果使用相机）
+        # 5.4 更新 深度图像
         if self.cfg.depth.use_camera and self.global_counter % self.cfg.depth.update_interval == 0:
-            self.extras["depth"] = self.depth_buffer[:, -2]  # 使用倒数第二帧（避免最新帧可能不完整）
+            self.extras["depth"] = self.depth_buffer[:, -2]  # 使用倒数第2帧（避免最新帧可能不完整）
             # interpolation = torch.rand((self.cfg.depth.camera_num_envs, 1, 1), device=self.device)
             # self.extras["depth"] = self.depth_buffer[:, -1] * interpolation + self.depth_buffer[:, -2] * (1-interpolation)
         else:
             self.extras["depth"] = None
 
-        # 返回所有需要的信息
         return policy_obs, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras, reset_env_ids, terminal_amp_states
 
 
@@ -296,28 +316,32 @@ class LeggedRobot(BaseTask):
 
 
     def get_observations(self):
+        """ 获取策略观测 """
         if self.cfg.env.include_history_steps is not None:
             policy_obs = self.obs_buf_history.get_obs_vec(np.arange(self.include_history_steps))
-        else:
+        else:  # 默认值为 None
             policy_obs = self.obs_buf
         return policy_obs
 
     def post_physics_step(self):
-        """ 检查终止条件，计算观测值和奖励
-            调用 self._post_physics_step_callback() 进行通用计算
-            在需要时调用 self._draw_debug_vis()
         """
-        # 从 Isaac Gym 仿真器中刷新各种状态张量，确保数据是最新的
+        计算 奖励、观测、重置某些env 获取它们的AMP观测、更新depth_buffer、更新上一control步的数据（action、关节位置、关节速度、扭矩、base的线速度和角速度）
+
+        Returns:
+            env_ids: 需要重置的env的 ID (num_envs_,)
+            terminal_amp_states: 需要重置的 env 的 AMP观测 (num_envs_, 30)
+        """
+        # 1. 从 Isaac Gym 仿真器中刷新各种状态张量，确保数据是最新的
         self.gym.refresh_actor_root_state_tensor(self.sim)   # 刷新 根状态 张量
         self.gym.refresh_net_contact_force_tensor(self.sim)  # 刷新 净接触力 张量
         self.gym.refresh_force_sensor_tensor(self.sim)       # 刷新 力传感器 张量
         self.gym.refresh_rigid_body_state_tensor(self.sim)   # 刷新 刚体状态 张量
 
-        # 增加 当前回合的 步数计数器 和 通用步数计数器
+        # 2. 增加 当前回合的 步数计数器 和 通用步数计数器
         self.episode_length_buf += 1   # 当前回合的步数 +1
         self.common_step_counter += 1  # 通用步数计数器 +1
 
-        # 准备计算所需的量，更新机器人的姿态、速度和重力投影信息
+        # 3. 准备计算所需的量，更新机器人的姿态、速度和重力投影信息
         self.base_quat[:] = self.root_states[:, 3:7]  # 更新机器人 base 的旋转四元数
         self.base_lin_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])   # 更新机器人 base 的 线速度
         self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])  # 更新机器人 base 的 角速度
@@ -327,19 +351,23 @@ class LeggedRobot(BaseTask):
         # 例如，当前动作遵循当前命令，而 _post_physics_step_callback() 可能会重新采样命令，导致奖励较低。
         self._post_physics_step_callback()  # 调用回调函数进行通用计算，如重新采样命令、计算地形高度等
 
-        # 计算观测值、奖励，检查是否需要重置环境
-        self.check_termination()  # 检查环境是否需要重置
-        self.compute_reward()  # 计算奖励
+        # 4. 检查环境是否需要 重置
+        self.check_termination()
 
-        # 获取需要重置的 env ID
-        env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
-        # 获取需要重置的 env 的终端 AMP 观测值
+        # 5. 计算 奖励
+        self.compute_reward()
+
+        # 6. 重置某些 env
+        env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()  # 获取需要重置的 env ID
+        # 获取需要重置的 env 的 AMP观测 (num_envs_, 30)
         terminal_amp_states = self.get_amp_observations()[env_ids]
+
         self.reset_idx(env_ids)  # 重置这些 env
 
-        self.update_depth_buffer()  # 更新深度缓冲区
+        # 7. 更新 depth缓冲区
+        self.update_depth_buffer()
 
-        # 重置环境后，机器人的姿态、速度和高度等信息可能发生变化，需要重新计算
+        # 8. 重置环境后，机器人的姿态、速度和高度等信息可能发生变化，需要重新计算
         self.base_quat[:] = self.root_states[:, 3:7]  # 重新更新机器人 base 的旋转四元数
         self.base_lin_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])  # 重新更新机器人 base 的线速度
         self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])  # 重新更新机器人 base 的角速度
@@ -347,10 +375,10 @@ class LeggedRobot(BaseTask):
 
         # self._post_physics_step_callback()
 
-        # 计算观测值，在某些情况下可能需要仿真步骤来刷新一些观测值（如身体位置）
+        # 9. 计算 观测（特权观测privileged_obs_buf 和 观测obs_buf，都是 (num_envs, 285)）
         self.compute_observations()
 
-        # 更新动作、关节位置、速度和扭矩的历史记录
+        # 10. 更新上一control步的 actions、关节位置、关节速度、扭矩、base的线速度和角速度
         self.last_last_actions[:] = self.last_actions[:]
         self.last_actions[:] = self.actions[:]
         self.last_dof_pos[:] = self.dof_pos[:]
@@ -358,7 +386,7 @@ class LeggedRobot(BaseTask):
         self.last_torques[:] = self.torques[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
 
-        # 如果存在查看器，并且启用了查看器同步和调试可视化，则显示深度图像
+        # 11. 如果存在查看器，并且启用了查看器同步和调试可视化，则显示深度图像
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             # self._draw_debug_vis()
             if self.cfg.depth.use_camera:
@@ -417,11 +445,11 @@ class LeggedRobot(BaseTask):
         # 4. 为重置的 env 重新采样 运动 commands
         self._resample_commands(env_ids)
 
-        # 5. 随机化PD增益（域随机化）
+        # 5. 域随机化 PD增益
         if self.cfg.domain_rand.randomize_gains:
             new_randomized_gains = self.compute_randomized_gains(len(env_ids))
-            self.randomized_p_gains[env_ids] = new_randomized_gains[0]  # 比例增益
-            self.randomized_d_gains[env_ids] = new_randomized_gains[1]  # 微分增益
+            self.randomized_p_gains[env_ids] = new_randomized_gains[0]  # P增益 (域随机化后的 * [0.8, 1.2])
+            self.randomized_d_gains[env_ids] = new_randomized_gains[1]  # D增益 (域随机化后的 * [0.8, 1.2])
 
         # 6. 重置各种缓冲区
         self.last_actions[env_ids] = 0.      # 上一动作
@@ -474,68 +502,78 @@ class LeggedRobot(BaseTask):
                     if(name == self.cfg.rewards.reward_curriculum_term[j]):
                         rew *= self.reward_curriculum_coef[j]
                 # print('reward:', name, ' coef:', self.reward_curriculum_coef)
-            self.rew_buf += rew
-            self.episode_sums[name] += rew
+            self.rew_buf += rew  # 累计 所有env的 奖励之和
+            self.episode_sums[name] += rew  # 累计 当前episode的 所有env的 奖励之和
         if self.cfg.rewards.only_positive_rewards:
             self.rew_buf[:] = torch.clip(self.rew_buf[:], min=0.)
         # add termination reward after clipping
         if "termination" in self.reward_scales:
-            rew = self._reward_termination() * self.reward_scales["termination"]
+            rew = self._reward_termination() * self.reward_scales["termination"]  # (num_envs,)
             self.rew_buf += rew
             self.episode_sums["termination"] += rew
 
 
     def compute_observations(self):
-        """ Computes observations
         """
-        self.privileged_obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
-                                    self.base_ang_vel  * self.obs_scales.ang_vel,
-                                    self.projected_gravity,
-                                    self.commands[:, :3] * self.commands_scale,
-                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                    self.dof_vel * self.obs_scales.dof_vel,
-                                    self.actions
-                                    ),dim=-1)
+        计算并构建 obs_buf
+            主要功能：
+            1. 构建特权观测(privileged_obs_buf)，包含机器人状态和环境信息
+            2. 根据配置添加各种感知输入
+            3. 添加噪声(可选)
+            4. 生成策略观测(policy observations)
+        """
+        # 1. 构建 基础的 特权观测 (privileged_obs_buf)
+        self.privileged_obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,  # base线速度 * 1.0
+                                    self.base_ang_vel  * self.obs_scales.ang_vel,  # base角速度 * 0.25
+                                    self.projected_gravity,  # 重力投影
+                                    self.commands[:, :3] * self.commands_scale,  # commands * [1.0, 1.0, 0.25]
+                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,  # 关节相对默认位置的偏移 * 1.0
+                                    self.dof_vel * self.obs_scales.dof_vel,  # 关节速度 * 0.005
+                                    self.actions  # actions
+                                    ),dim=-1)  # (num_envs, 48)
 
-        if (self.cfg.env.privileged_obs):
+        # 2. 如果启用特权观测，添加额外感知输入
+        if (self.cfg.env.privileged_obs):  # 默认，启用特权观测
             # add perceptive inputs if not blind
-            if self.cfg.terrain.measure_heights:
+            if self.cfg.terrain.measure_heights:  # 默认，启用 地形高度测量 (num_envs, 187)
                 heights = torch.clip(self.root_states[:, 2].unsqueeze(1) - self.cfg.normalization.base_height - self.measured_heights, -1, 1.) * self.obs_scales.height_measurements
                 self.privileged_obs_buf = torch.cat((self.privileged_obs_buf, heights), dim=-1)
 
-            if self.cfg.domain_rand.randomize_friction:
+            if self.cfg.domain_rand.randomize_friction:  # 默认，启用 域随机化 静摩擦力 (num_envs, 1)
                 self.privileged_obs_buf= torch.cat((self.randomized_frictions, self.privileged_obs_buf), dim=-1)
 
-            if self.cfg.domain_rand.randomize_restitution:
+            if self.cfg.domain_rand.randomize_restitution:  # 默认，启用 域随机化 弹性系数 (num_envs, 1)
                 self.privileged_obs_buf = torch.cat((self.randomized_restitutions, self.privileged_obs_buf), dim=-1)
 
-            if (self.cfg.domain_rand.randomize_base_mass):
+            if (self.cfg.domain_rand.randomize_base_mass):  # 默认，启用 域随机化 base质量 (num_envs, 1)
                 self.privileged_obs_buf = torch.cat((self.randomized_added_masses ,self.privileged_obs_buf), dim=-1)
 
-            if (self.cfg.domain_rand.randomize_com_pos):
+            if (self.cfg.domain_rand.randomize_com_pos):  # 默认，启用 域随机化 质心位置 (num_envs, 3)
                 self.privileged_obs_buf = torch.cat((self.randomized_com_pos * self.obs_scales.com_pos ,self.privileged_obs_buf), dim=-1)
 
-            if (self.cfg.domain_rand.randomize_gains):
+            if (self.cfg.domain_rand.randomize_gains):  # 默认，启用 域随机化 PD增益 (num_envs, 12) + (num_envs, 12)
                 self.privileged_obs_buf = torch.cat(((self.randomized_p_gains / self.p_gains - 1) * self.obs_scales.pd_gains ,self.privileged_obs_buf), dim=-1)
                 self.privileged_obs_buf = torch.cat(((self.randomized_d_gains / self.d_gains - 1) * self.obs_scales.pd_gains, self.privileged_obs_buf),
                                                     dim=-1)
-
+            # 添加 力传感器数据 (num_envs, 12)
             contact_force = self.sensor_forces.flatten(1) * self.obs_scales.contact_force
             self.privileged_obs_buf = torch.cat((contact_force, self.privileged_obs_buf), dim=-1)
-            contact_flag = torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1
+
+            # 添加 指定关节是否发生碰撞的标志 (num_envs, 8)
+            contact_flag = torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1  # 每个env的指定关节的 接触力的模 > 0.1，则视为发生碰撞
             self.privileged_obs_buf = torch.cat((contact_flag, self.privileged_obs_buf), dim=-1)
 
-        # add noise if needed
-        if self.add_noise:
+        # 3. 添加噪声
+        if self.add_noise:  # 默认 False
             self.privileged_obs_buf += (2 * torch.rand_like(self.privileged_obs_buf) - 1) * self.noise_scale_vec
 
 
-        # Remove velocity observations from policy observation.
-        if self.num_obs == self.num_privileged_obs - 6:
+        # 4. 生成 obs_buf（从特权观测中移除部分信息）
+        if self.num_obs == self.num_privileged_obs - 6:  # 移除 线速度 和 角速度
             self.obs_buf = self.privileged_obs_buf[:, 6:]
-        elif self.num_obs == self.num_privileged_obs - 3:
+        elif self.num_obs == self.num_privileged_obs - 3:  # 移除 线速度
             self.obs_buf = self.privileged_obs_buf[:, 3:]
-        else:
+        else:  # 默认，不移除任何信息
             self.obs_buf = torch.clone(self.privileged_obs_buf)
 
     def get_amp_observations(self):
@@ -749,36 +787,41 @@ class LeggedRobot(BaseTask):
         # self.commands[self.gap_start_idx:self.gap_end_idx, 3] = 0
 
     def _compute_torques(self, actions):
-        """ Compute torques from actions.
-            Actions can be interpreted as position or velocity targets given to a PD controller, or directly as scaled torques.
-            [NOTE]: torques must have the same dimension as the number of DOFs, even if some DOFs are not actuated.
+        """
+        从 actions 计算 扭矩
+            actions 根据控制模式，actions可被为当作： PD控制器 的 位置 / 速度目标 / 缩放后的扭矩
+            注意：扭矩维度必须与自由度(DOF)数量相同，即使某些DOF未被驱动
 
         Args:
-            actions (torch.Tensor): Actions
-
+            actions (torch.Tensor): (num_evns, 12)
         Returns:
             [torch.Tensor]: Torques sent to the simulation
         """
-        #pd controller
+        # pd controller
         actions_scaled = actions * self.cfg.control.action_scale
         control_type = self.cfg.control.control_type
 
-        if self.cfg.domain_rand.randomize_gains:
+        # 获取PD增益参数
+        if self.cfg.domain_rand.randomize_gains:  # 默认，如果启用了域随机化，使用随机化后的增益参数
             p_gains = self.randomized_p_gains
             d_gains = self.randomized_d_gains
         else:
             p_gains = self.p_gains
             d_gains = self.d_gains
 
-        if control_type=="P":
+        # 根据控制类型计算扭矩
+        if control_type=="P":  # 位置控制模式
+            # 扭矩 = P增益 * (目标位置 - 当前位置) + D增益 * 当前速度            其中，目标位置 = actions * action_scale + default_dof_pos
             torques = p_gains*(actions_scaled + self.default_dof_pos - self.dof_pos) - d_gains*self.dof_vel
-        elif control_type=="V":
+        elif control_type=="V":  # 速度控制模式
+            # 扭矩 = P增益 * (目标速度 - 当前速度) + D增益 * 加速度              其中，加速度 = (当前速度 - 上一时刻速度) / 物理时间步长
             torques = p_gains*(actions_scaled - self.dof_vel) - d_gains*(self.dof_vel - self.last_dof_vel)/self.sim_params.dt
-        elif control_type=="T":
+        elif control_type=="T":  # 扭矩控制模式
+            # 直接使用 缩放后的action 作为 扭矩
             torques = actions_scaled
         else:
             raise NameError(f"Unknown controller type: {control_type}")
-        return torch.clip(torques, -self.torque_limits, self.torque_limits)
+        return torch.clip(torques, -self.torque_limits, self.torque_limits)  # 裁剪到扭矩限制范围内
 
     def _reset_dofs(self, env_ids):
         """ Resets DOF position and velocities of selected environmments
@@ -976,7 +1019,7 @@ class LeggedRobot(BaseTask):
         """
         noise_start_dim = self.privileged_dim - 3 # last 3-dim is the linear vel
         noise_vec = torch.zeros_like(self.privileged_obs_buf[0])
-        self.add_noise = self.cfg.noise.add_noise
+        self.add_noise = self.cfg.noise.add_noise  # False
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
         noise_vec[noise_start_dim:noise_start_dim+3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
@@ -1009,11 +1052,11 @@ class LeggedRobot(BaseTask):
         # 将获取的原始张量包装成PyTorch张量
         self.root_states = gymtorch.wrap_tensor(actor_root_state)  # 根状态
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)  # 关节状态
-        self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]  # 关节位置 (num_env, 12, 1)
-        self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]  # 关节速度 (num_env, 12, 1)
+        self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]  # 当前 关节位置 (num_env, 12, 1)
+        self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]  # 当前 关节速度 (num_env, 12, 1)
         self.base_quat = self.root_states[:, 3:7]  # base 的旋转四元数（世界坐标系）
 
-        # 存储每个刚体在xyz方向的接触力，(num_envs, num_bodies, 3)
+        # 存储每个刚体在xyz方向的接触力，(num_envs, num_bodies 17, 3)
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3)
 
         # 获取并处理 力传感器 数据
@@ -1035,11 +1078,12 @@ class LeggedRobot(BaseTask):
         self.noise_scale_vec = self._get_noise_scale_vec(self.cfg)
         self.gravity_vec = to_torch(get_axis_params(-1., self.up_axis_idx), device=self.device).repeat((self.num_envs, 1))
         self.forward_vec = to_torch([1., 0., 0.], device=self.device).repeat((self.num_envs, 1))    # 机器人的前进方向（base坐标系）
-        # 初始化 actions 和 torques 张量
-        self.torques = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
-        self.p_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
-        self.d_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
-        # 机器人的 actions, 为输出的 四肢的关节角度（按腿的顺序：FL, FR, RL, RR），(num_envs, 12)
+        # 初始化 torques
+        self.torques = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)  # (num_envs, 12)
+        # 初始化 PD增益
+        self.p_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)  # P增益 (num_envs, 12)
+        self.d_gains = torch.zeros(self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)  # D增益 (num_envs, 12)
+        # 初始化 actions。TODO 机器人的 actions 为输出的 四肢的关节角度（按腿的顺序：FL, FR, RL, RR），(num_envs, 12)
         self.actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_last_actions = torch.zeros_like(self.last_actions)
@@ -1051,7 +1095,7 @@ class LeggedRobot(BaseTask):
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_torques = torch.zeros_like(self.torques)
         self.last_root_vel = torch.zeros_like(self.root_states[:, 7:13])
-        self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False) # x vel, y vel, yaw vel, heading
+        self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False) # (num_envs, 4): x vel, y vel, yaw vel, heading
         self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel], device=self.device, requires_grad=False,) # TODO change this
         self.feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float, device=self.device, requires_grad=False)
         self.last_contacts = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False)
@@ -1093,8 +1137,10 @@ class LeggedRobot(BaseTask):
                                             self.cfg.depth.resized[1]).to(self.device)
 
     def compute_randomized_gains(self, num_envs):
+        # (num_envs, 12) 的 0.8 - 1.2 的随机数
         p_mult = torch_rand_float(self.cfg.domain_rand.stiffness_multiplier_range[0], self.cfg.domain_rand.stiffness_multiplier_range[1],
                                   (num_envs, self.num_actions), device=self.device)
+        # (num_envs, 12) 的 0.8 - 1.2 的随机数
         d_mult = torch_rand_float(self.cfg.domain_rand.damping_multiplier_range[0], self.cfg.domain_rand.damping_multiplier_range[1],
                                   (num_envs, self.num_actions), device=self.device)
         return p_mult * self.p_gains, d_mult * self.d_gains
@@ -1148,7 +1194,7 @@ class LeggedRobot(BaseTask):
             name = '_reward_' + name
             self.reward_functions.append(getattr(self, name))
 
-        # 为 每个scale非0的 奖励函数 创建一个 tensor (num_env, )，存储在 episode 中每个 envs 的奖励累计值
+        # 当前episode的 所有env的 奖励之和：为 每个scale非0的 奖励函数 创建一个 tensor (num_env, )
         self.episode_sums = {name: torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
                              for name in self.reward_scales.keys()}
 
@@ -1266,12 +1312,12 @@ class LeggedRobot(BaseTask):
         # save body names from the asset
         body_names = self.gym.get_asset_rigid_body_names(robot_asset)
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
-        print("dof_names: ", self.dof_names)
+        print("[legged_robot] dof_names: ", self.dof_names)
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)
         feet_names = [s for s in body_names if self.cfg.asset.foot_name in s]
         penalized_contact_names = []
-        for name in self.cfg.asset.penalize_contacts_on:
+        for name in self.cfg.asset.penalize_contacts_on:  # ["thigh", "calf"]
             penalized_contact_names.extend([s for s in body_names if name in s])
         termination_contact_names = []
         for name in self.cfg.asset.terminate_after_contacts_on:
@@ -1301,11 +1347,11 @@ class LeggedRobot(BaseTask):
         self.actor_handles = []
         self.envs = []
         self.cam_handles = []
-        #for domain randomization
-        self.randomized_frictions = torch.zeros(self.num_envs, 1, device=self.device, requires_grad=False)
-        self.randomized_restitutions = torch.zeros(self.num_envs, 1, device=self.device, requires_grad=False)
-        self.randomized_added_masses = torch.zeros(self.num_envs, 1, device=self.device, requires_grad=False)
-        self.randomized_com_pos = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
+        # for domain randomization
+        self.randomized_frictions = torch.zeros(self.num_envs, 1, device=self.device, requires_grad=False)  # 域随机化的 静摩擦力 (num_envs, 1)
+        self.randomized_restitutions = torch.zeros(self.num_envs, 1, device=self.device, requires_grad=False)  # 域随机化的 弹性系数 (num_envs, 1)
+        self.randomized_added_masses = torch.zeros(self.num_envs, 1, device=self.device, requires_grad=False)  # 域随机化的 base质量 (num_envs, 1)
+        self.randomized_com_pos = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)       # 域随机化的 质心位置 (num_envs, 3)
 
         if(self.cfg.depth.use_camera):
             # All robots of Tilt and Crawl needs depth camera
@@ -1343,7 +1389,7 @@ class LeggedRobot(BaseTask):
         for i in range(len(feet_names)):
             self.feet_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], feet_names[i])
 
-        self.penalised_contact_indices = torch.zeros(len(penalized_contact_names), dtype=torch.long, device=self.device, requires_grad=False)
+        self.penalised_contact_indices = torch.zeros(len(penalized_contact_names), dtype=torch.long, device=self.device, requires_grad=False)  # (num_envs, 8)
         for i in range(len(penalized_contact_names)):
             self.penalised_contact_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], penalized_contact_names[i])
 
@@ -1568,10 +1614,9 @@ class LeggedRobot(BaseTask):
         return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
 
     def _reward_collision(self):
-        # 惩罚 选定身体部位的碰撞
-        # 当接触力的模 > 0.1N，则判定发生碰撞，计为 1
-        # 然后对每个所有选定身体部位的碰撞情况求和
-        return torch.sum(1.*(torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1), dim=1)
+        # 惩罚 指定关节的碰撞
+        # 当指定关节接触力的 模 > 0.1N，则判定发生碰撞，计为 1
+        return torch.sum(1.*(torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1), dim=1)  # 每个env所有指定关节接触力之和 (num_envs,)
 
     def _reward_termination(self):
         # Terminal reward / penalty

@@ -124,27 +124,42 @@ class AMPPPO:
         self.actor_critic.train()
 
     def act(self, obs, critic_obs, amp_obs, history, wm_feature):
-        """根据观察生成动作"""
+        """
+        根据 观察 生成 动作
+
+        Args:
+            obs: (num_envs, 285)
+            critic_obs: (num_envs, 285)
+            amp_obs: (num_envs, 30)
+            history: 4个历史观测 + 当前观测 (num_envs, 5*42)
+            wm_feature: 世界模型特征 ———— 当前时间步的 确定性状态 (num_envs, 512)
+
+        Returns:
+            action: (num_envs, 12)
+        """
         if self.actor_critic.is_recurrent:  # 默认，False
             self.transition.hidden_states = self.actor_critic.get_hidden_states()
 
-        # 存储 历史特征 和 世界模型特征
+        # 存储 历史观测 和 世界模型确定性状态
         self.transition.history = history
         self.transition.wm_feature = wm_feature.detach()
 
-        # 计算 action 和 value
         aug_obs, aug_critic_obs = obs.detach(), critic_obs.detach()
+
+        # 1. 执行 Policy: 历史观测特征 + command + 世界模型特征 ==actor==> actions
         self.transition.actions = self.actor_critic.act(aug_obs, history, wm_feature).detach()
+
         # self.actor_critic.eval()
+        # 2. 状态价值评估：特权观测 + 世界模型特征 ==critic==> values
         self.transition.values = self.actor_critic.evaluate(aug_critic_obs, wm_feature).detach()
         # self.actor_critic.train()
 
-        # 记录 action 相关信息
-        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()
-        self.transition.action_mean = self.actor_critic.action_mean.detach()  # action 高斯分布的 均值
-        self.transition.action_sigma = self.actor_critic.action_std.detach()  # action 高斯分布的 标准差
+        # 3. 记录 action 高斯分布的 相关信息
+        self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(self.transition.actions).detach()  # action 高斯分布的 对数概率 之和 (num_envs,)
+        self.transition.action_mean = self.actor_critic.action_mean.detach()  # action 高斯分布的 均值   (num_envs,)
+        self.transition.action_sigma = self.actor_critic.action_std.detach()  # action 高斯分布的 标准差 (num_envs,)
 
-        # 存储 obs 和 critic_obs 数据（在 env.step() 之前）
+        # 4. 存储 obs、critic_obs、amp_obs数据（在 env.step() 之前）
         self.transition.observations = obs
         self.transition.critic_observations = critic_obs
         self.amp_transition.observations = amp_obs

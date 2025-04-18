@@ -289,7 +289,7 @@ class LeggedRobotCfgPPO(BaseConfig):
     class runner:
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
-        num_steps_per_env = 24 # per iteration
+        num_steps_per_env = 24 # 每个 iteration 迭代 24 steps
         max_iterations = 1500 # number of policy updates
 
         # logging

@@ -48,7 +48,7 @@ class AliengoAMPCfg(LeggedRobotCfg):
         height_dim = 187  # privileged_obs[:,-height_dim:] is the heightmap in privileged_obs
         forward_height_dim = 525 # for depth image prediction
         num_observations = prop_dim + privileged_dim + height_dim + action_dim
-        num_privileged_obs = prop_dim + privileged_dim + height_dim + action_dim    # 特权观测维度：共285维 (53 + 33 + 12 + 187)，前53维是特权信息（包含3维base的线速度），中间45维是本体感知+action，后187维是特权观测中的 heightmap
+        num_privileged_obs = prop_dim + privileged_dim + height_dim + action_dim    # 特权观测维度：共285维 (53 + 33 + 12 + 187)，前53维是特权信息（包含3维base的线速度），中间33维是本体感知 + 12维action，后187维是heightmap
         reference_state_initialization = False
         reference_state_initialization_prob = 0.85
         amp_motion_files = MOTION_FILES
@@ -128,10 +128,10 @@ class AliengoAMPCfg(LeggedRobotCfg):
 
     class control(LeggedRobotCfg.control):
         # PD Drive parameters:
-        control_type = 'P'
+        control_type = 'P'  # 扭矩的 控制类型：P(位置)、V(速度)或T(扭矩)
         stiffness = {'joint': 40.}  # [N*m/rad]
         damping = {'joint': 2.0}  # [N*m*s/rad]
-        # action scale: target angle = actionScale * action + defaultAngle
+        # 目标位置 = actions * action_scale + default_dof_pos
         action_scale = 0.5  # Aliengo 还是应设为 0.5
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4  # 控制解算器间隔，每4个sim dt执行一次动作
@@ -165,7 +165,7 @@ class AliengoAMPCfg(LeggedRobotCfg):
     class asset(LeggedRobotCfg.asset):
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/aliengo/urdf/aliengo.urdf'
         foot_name = "foot"
-        penalize_contacts_on = ["thigh", "calf"]
+        penalize_contacts_on = ["thigh", "calf"]  # 当发生碰撞要惩罚的 关节
         # terminate_after_contacts_on = [
         #     "base", "FL_calf", "FR_calf", "RL_calf", "RR_calf",
         #     "FL_thigh", "FR_thigh", "RL_thigh", "RR_thigh"]

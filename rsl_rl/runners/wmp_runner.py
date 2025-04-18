@@ -85,7 +85,7 @@ class WMPRunner:
 
         if self.env.include_history_steps is not None:
             num_actor_obs = self.env.num_obs * self.env.include_history_steps
-        else:   # 默认，actor 的 观测维度 =
+        else:   # 默认，actor 的 观测维度 = 285
             num_actor_obs = self.env.num_obs
 
         # 2. 创建 世界模型（包含 Encoder、RSSM、Decoder、奖励预测器）
@@ -97,7 +97,7 @@ class WMPRunner:
                                               weight_decay=self.depth_predictor_cfg["weight_decay"])
         # 4. RL
         # 历史观测维度
-        self.history_dim = history_length * (self.env.num_obs - self.env.privileged_dim - self.env.height_dim - 3) # 5 * (总观测维度285 - 特权观测维度53 - 高度图维度187 - 排除3维的命令(线速度x2 + 角速度)3) = 5 * 42
+        self.history_dim = history_length * (self.env.num_obs - self.env.privileged_dim - self.env.height_dim - 3) # 5 * (总观测维度285 - 特权观测维度53 - 高度图维度187 - 3维的command(线速度x2 + 角速度) = 5 * 42
 
         # 4.1 Actor-Critic 网络（包含 history_encoder、wm_feature_encoder、critic_wm_feature_encoder、actor、critic）
         # 处理 世界模型特征、历史观测特征，然后结合 command 或 特权观测信息 进行 action 预测 和 状态价值估计
@@ -138,7 +138,7 @@ class WMPRunner:
         self.alg: PPO = alg_class(actor_critic, discriminator, amp_data, amp_normalizer, device=self.device,
                                   min_std=min_std, **self.alg_cfg)
 
-        self.num_steps_per_env = self.cfg["num_steps_per_env"]  # 每个 env 迭代的步数 = 24
+        self.num_steps_per_env = self.cfg["num_steps_per_env"]  # 每个 iteration 迭代 24 steps
         self.save_interval = self.cfg["save_interval"]
 
         # 初始化 storage and model
@@ -152,7 +152,7 @@ class WMPRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
 
-        # 6. 重置所有机器人
+        # 6. 重置所有机器人，即执行一步 0 action 来获取 初始观测（obs, privileged_obs）
         _, _ = self.env.reset()
 
 
@@ -190,17 +190,18 @@ class WMPRunner:
         # 允许 世界模型 和 RL env 在不同的 device 上
         if (self.wm_config.wm_device != 'None'):
             self.wm_config.device = self.wm_config.wm_device
+
         self.wm_config.num_actions = self.wm_config.num_actions * self.env.cfg.depth.update_interval    # 12 * 5
+
         prop_dim = self.env.num_obs - self.env.privileged_dim - self.env.height_dim - self.env.num_actions  # 本体感知维度 33
         image_shape = self.env.cfg.depth.resized + (1,) # (64, 64, 1)
-        print(f"[building world_model] prop_shape: {(prop_dim,)}, image shape: {image_shape}")
         obs_shape = {'prop': (prop_dim,), 'image': image_shape,}
 
         # 3. 创建 世界模型（包含 Encoder、RSSM、Decoder、奖励预测器）
         self._world_model = WorldModel(self.wm_config, obs_shape, use_camera=self.env.cfg.depth.use_camera)
         self._world_model = self._world_model.to(self._world_model.device)
         print('Finish construct world model')
-        # 世界模型特征维度，512
+        # 世界模型特征（确定性状态）维度，512
         self.wm_feature_dim = self.wm_config.dyn_deter #+ self.wm_config.dyn_stoch * self.wm_config.dyn_discrete
 
 
@@ -225,10 +226,10 @@ class WMPRunner:
             self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf,
                                                              high=int(self.env.max_episode_length))
 
-        # 3. 获取初始观测数据
-        obs = self.env.get_observations()  # 普通观测
-        privileged_obs = self.env.get_privileged_observations()  # 特权观测
-        amp_obs = self.env.get_amp_observations()  # AMP观测
+        # 3. 获取 初始观测 数据（WMPRunner 初始化时，已进行过一次 0 action的 仿真，因此可以获取到初始观测）
+        obs = self.env.get_observations()  # 策略观测 (num_envs, 285)
+        privileged_obs = self.env.get_privileged_observations()  # 特权观测 (num_envs, 285)
+        amp_obs = self.env.get_amp_observations()  # AMP观测 (num_envs, 30)
         critic_obs = privileged_obs if privileged_obs is not None else obs  # critic 观测 = 特权观测
 
         # 4. 将观测数据转移到指定设备
@@ -248,26 +249,27 @@ class WMPRunner:
         # 7. 计算 总迭代次数
         tot_iter = self.current_learning_iteration + num_learning_iterations
 
-        # 8. 初始化 轨迹历史 缓冲区 (num_envs, 5, 42)
+        # 8. 初始化 轨迹历史 (num_envs, 5, 42)
         self.trajectory_history = torch.zeros(size=(self.env.num_envs, self.history_length,
                                                     self.env.num_obs - self.env.privileged_dim - self.env.height_dim - 3),
                                               device=self.device)
 
-        # 获取 初始观测（去除 特权信息、heightmap、command）, (num_envs, 42)
+        # 获取 初始观测（ 本体感知(去除command) + action ）, (num_envs, 42)
         obs_without_command = torch.concat((obs[:, self.env.privileged_dim:self.env.privileged_dim + 6],
                                             obs[:, self.env.privileged_dim + 9:-self.env.height_dim]), dim=1)
-        # 9. 滑动窗口 更新 轨迹历史：丢弃最旧的历史帧、加入新的观测 (num_envs, 5, 42)
+        # 9. 滑动窗口 更新 轨迹历史：丢弃最旧的历史观测、加入新的观测 (num_envs, 5, 42)
         self.trajectory_history = torch.concat((self.trajectory_history[:, 1:], obs_without_command.unsqueeze(1)), dim=1)
 
         # 10. 初始化 世界模型输入
         sum_wm_dataset_size = 0       # 世界模型 数据集大小
-        wm_latent = wm_action = None  # 世界模型 潜在状态 和 action
-        wm_is_first = torch.ones(self.env.num_envs, device=self._world_model.device)  # 标记是否为 episode 开始
+        wm_latent = None  # 世界模型 潜在状态，{"stoch": (num_envs, 32, 32), "deter": (num_envs, 512), "logit": (num_envs, 32, 32)}
+        wm_action = None
+        # prev_state (dict): 世界模型前一时间步潜在状态，
+        wm_is_first = torch.ones(self.env.num_envs, device=self._world_model.device)  # 标记是否为 episode 开始 (num_envs,)
 
         # 11. 构建 世界模型观测 dict
         wm_obs = {
-            "prop": obs[:, self.env.privileged_dim:self.env.privileged_dim + self.env.cfg.env.prop_dim]
-                     .to(self._world_model.device),  # 本体感知特征 (num_envs, 33)
+            "prop": obs[:, self.env.privileged_dim:self.env.privileged_dim + self.env.cfg.env.prop_dim].to(self._world_model.device),  # 本体感知特征 (num_envs, 33)
             "is_first": wm_is_first,  # 为 1 表明是 episode 开始 (num_envs,)
         }
 
@@ -277,44 +279,59 @@ class WMPRunner:
         wm_metrics = None  # 世界模型 训练指标
         self.wm_update_interval = self.env.cfg.depth.update_interval  # 世界模型更新间隔，5 个 timestep, 即 0.1s
 
-        # 12. 初始化 世界模型 action历史 缓冲区 (num_envs, 5, 12)
-        wm_action_history = torch.zeros(size=(self.env.num_envs, self.wm_update_interval, self.env.num_actions),
-                                        device=self._world_model.device)
+        # 12. 初始化 一些参数
+        wm_action_history = torch.zeros(size=(self.env.num_envs, self.wm_update_interval, self.env.num_actions), device=self._world_model.device)  # 世界模型 action历史 缓冲区 (num_envs, 5, 12)
         wm_reward = torch.zeros(self.env.num_envs, device=self._world_model.device)  # 世界模型 奖励 (num_envs,)
-        wm_feature = torch.zeros((self.env.num_envs, self.wm_feature_dim))  # 世界模型特征 (num_envs, 512)
+        wm_feature = torch.zeros((self.env.num_envs, self.wm_feature_dim))  # 世界模型 当前时间步的 确定性状态 (num_envs, 512)
 
         # 13. 初始化 世界模型数据集 wm_dataset 和 wm_buffer 各分量为 0 tensor
         self.init_wm_dataset()
 
-        # 14. 训练
+        # 循环训练
         for it in range(self.current_learning_iteration, tot_iter):
-            # 14.1 更新 奖励课程（如果启用）
+            # 14. 更新 奖励课程（如果启用）
             if (self.env.cfg.rewards.reward_curriculum):
                 self.env.update_reward_curriculum(it)
 
             start = time.time()
 
-            # 14.2 环境交互 和 数据收集阶段
+            # 15. 环境交互 和 数据收集阶段
             with torch.inference_mode():  # 禁用 梯度计算 以提高性能
-                for i in range(self.num_steps_per_env):  # 24
-                    # 14.2.1 更新 世界模型 状态（每 5 step 更新）
+                # 15.1 每个 iteration 迭代 24 steps
+                for i in range(self.num_steps_per_env):
+                    print(f"[iter {it}] env step {i}")
+                    # (1) 每 5 steps 更新 1 次世界模型的 状态
                     if (self.env.global_counter % self.wm_update_interval == 0):
-                        # 世界模型观测 编码特征 (num_envs, 5120)
-                        wm_embed = self._world_model.encoder(wm_obs)
-                        # 结合世界模型观测的 更新：预测 当前时间步的 后验状态（后验随机状态、先验确定性状态、logit） 和 先验状态
-                        wm_latent, _ = self._world_model.dynamics.obs_step(
-                            wm_latent, wm_action, wm_embed, wm_obs["is_first"])
-                        # 获取 当前时间步的 确定性状态
-                        wm_feature = self._world_model.dynamics.get_deter_feat(wm_latent)
-                        wm_is_first[:] = 0  # 将起始标记 置为 0
+                        wm_embed = self._world_model.encoder(wm_obs)  # 世界模型观测 编码特征 (num_envs, 5120)
 
-                    # 14.2.2 获取动作并执行环境步骤
+                        # 世界模型 潜在状态更新： 前一时间步状态 + 前一时间步action + 世界模型观测特征，预测 当前时间步状态（后验随机状态、先验确定性状态、状态分布参数）
+                        # {"stoch": (num_envs, 32, 32), "deter": (num_envs, 512), "logit": (num_envs, 32, 32)}
+                        wm_latent, _ = self._world_model.dynamics.obs_step(wm_latent, wm_action, wm_embed, wm_obs["is_first"])
+
+                        wm_feature = self._world_model.dynamics.get_deter_feat(wm_latent)  # 当前时间步的 确定性状态
+                        wm_is_first[:] = 0  # 将起始标记 全置为 0，意为都不是 episode 开始
+
                     history = self.trajectory_history.flatten(1).to(self.device)  # (num_envs, 5*42)
+                    # (2) 执行 PPO算法:
+                    #   执行 Policy: 历史观测特征 + command + 世界模型特征 ==actor==> actions
+                    #   状态价值评估：特权观测 + 世界模型特征 ==critic==> values
+                    #   存储 obs、critic_obs、amp_obs数据（在 env.step() 之前）
                     actions = self.alg.act(obs, critic_obs, amp_obs, history, wm_feature.to(self.env.device))
+
+                    # (3) 执行 env 仿真
+                    #   执行一个control步（包含 4 个物理仿真步）
+                    #   计算 奖励
+                    #   计算 新的观测（privileged_obs_buf 和 obs_buf，都是 (num_envs, 285)）
+                    #   重置某些env 获取它们的AMP观测
+                    #   更新 depth_buffer
+                    #   更新上一control步的数据（action、关节位置、关节速度、扭矩、base的线速度和角速度）
+                    # 返回： obs、privileged_obs、所有env的 奖励之和、所有env的 重置标记、额外信息、需要重置的env的 ID、需要重置的env的 AMP观测
                     obs, privileged_obs, rewards, dones, infos, reset_env_ids, terminal_amp_states = self.env.step(actions)
+
+                    # (4) 获取 所有env的 新的 AMP观测
                     next_amp_obs = self.env.get_amp_observations()
 
-                    # 19. 处理观测数据
+                    # TODO 19. 处理观测数据
                     critic_obs = privileged_obs if privileged_obs is not None else obs
                     obs, critic_obs, next_amp_obs, rewards, dones = obs.to(self.device), critic_obs.to(
                         self.device), next_amp_obs.to(self.device), rewards.to(self.device), dones.to(self.device)
@@ -404,30 +421,30 @@ class WMPRunner:
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
 
-                # 27. 记录数据收集时间
+                # 15.2 记录数据收集时间
                 stop = time.time()
                 collection_time = stop - start
 
-                # 28. 学习阶段 - 计算回报
+                # 15.3 学习阶段 - 计算回报
                 start = stop
                 self.alg.compute_returns(critic_obs, wm_feature.to(self.env.device))
 
-            # 29. 执行策略更新
+            # 16. 执行策略更新
             mean_value_loss, mean_surrogate_loss, mean_vel_predict_loss, mean_amp_loss, mean_grad_pen_loss, mean_policy_pred, mean_expert_pred = self.alg.update()
             stop = time.time()
             learn_time = stop - start
 
-            # 30. 记录训练指标
+            # 17. 记录训练指标
             if self.log_dir is not None:
                 self.log(locals())
 
-            # 31. 定期保存模型
+            # 18. 定期保存模型
             if it % self.save_interval == 0:
                 self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
 
             ep_infos.clear()  # 清空episode信息
 
-            # 32. 训练世界模型和深度预测器（如果数据集足够大）
+            # 19. 训练世界模型和深度预测器（如果数据集足够大）
             start_time = time.time()
             if (sum_wm_dataset_size > self.wm_config.train_start_steps):
                 # 定期训练深度预测器
@@ -441,14 +458,14 @@ class WMPRunner:
                     self.writer.add_scalar('World_model/' + name, float(np.mean(values)), it)
             print('training world model time:', time.time() - start_time)
 
-            # 33. 首次迭代时复制配置文件到日志目录
+            # 20. 首次迭代时复制配置文件到日志目录
             if(it == 0):
                 robot_name = self.cfg["experiment_name"].split("_")[0]
                 file_name = self.cfg["experiment_name"].split("_")[0] + "_" + self.cfg["experiment_name"].split("_")[1]
                 print(f"------ cp ./legged_gym/envs/{robot_name}/{file_name}_config.py ------")
                 os.system(f"cp ./legged_gym/envs/{robot_name}/{file_name}_config.py " + self.log_dir + "/")
 
-        # 34. 更新当前训练迭代次数并保存最终模型
+        # 21. 更新当前训练迭代次数并保存最终模型
         self.current_learning_iteration += num_learning_iterations
         self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
 

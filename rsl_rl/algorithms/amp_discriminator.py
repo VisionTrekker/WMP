@@ -91,12 +91,19 @@ class AMPDiscriminator(nn.Module):
 
     def predict_amp_reward(
             self, state, next_state, task_reward, normalizer=None):
+        """
+        Args:
+            state: 旧AMP观测 (num_envs, 30)
+            next_state: 新AMP观测 (num_envs, 30)
+            task_reward: 累计的所有env的奖励之和 (num_envs,)
+            normalizer: PPO的标准化器
+        """
         with torch.no_grad():
             self.eval()
             if normalizer is not None:
                 state = normalizer.normalize_torch(state, self.device)
                 next_state = normalizer.normalize_torch(next_state, self.device)
-
+            # (num_envs, 60) ==> (num_envs, 512) ==> (num_envs, 1)
             d = self.amp_linear(self.trunk(torch.cat([state, next_state], dim=-1)))
             reward = self.amp_reward_coef * torch.clamp(1 - (1/4) * torch.square(d - 1), min=0)
             if self.task_reward_lerp > 0:

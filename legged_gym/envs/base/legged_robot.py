@@ -1050,7 +1050,7 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_rigid_body_state_tensor(self.sim)
 
         # 将获取的原始张量包装成PyTorch张量
-        self.root_states = gymtorch.wrap_tensor(actor_root_state)  # 根状态
+        self.root_states = gymtorch.wrap_tensor(actor_root_state)  # 根状态 (num_envs, 13)
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)  # 关节状态
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 0]  # 当前 关节位置 (num_env, 12, 1)
         self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]  # 当前 关节速度 (num_env, 12, 1)
@@ -1568,6 +1568,10 @@ class LeggedRobot(BaseTask):
         return heights.view(self.num_envs, -1) * self.terrain.cfg.vertical_scale
 
     def get_forward_map(self):
+        # 1. 计算相对高度：机器人base高度 - 基准高度 - 前方地形高度
+        #   - self.root_states[:, 2].unsqueeze(1): 机器人base的Z坐标 (num_envs, 1)
+        #   - self.cfg.normalization.base_height: 基准高度标量 (0.5)
+        #   - self.measured_forward_heights: 前方地形高度测量值 (num_envs, 525)
         return torch.clip(self.root_states[:, 2].unsqueeze(1) - self.cfg.normalization.base_height - self.measured_forward_heights, -1,
                              1.) * self.obs_scales.height_measurements
 

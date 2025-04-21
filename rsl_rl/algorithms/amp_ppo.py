@@ -187,7 +187,7 @@ class AMPPPO:
         self.actor_critic.reset(dones)
 
     def compute_returns(self, last_critic_obs, wm_feature):
-        """计算回报(returns)"""
+        """ 计算回报(returns) """
         aug_last_critic_obs = last_critic_obs.detach()
         # self.actor_critic.eval()
         last_values = self.actor_critic.evaluate(aug_last_critic_obs, wm_feature).detach()

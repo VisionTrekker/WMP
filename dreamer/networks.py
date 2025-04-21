@@ -245,7 +245,7 @@ class RSSM(nn.Module):
     def obs_step(self, prev_state, prev_action, embed, is_first, sample=True):
         """
         执行一步 结合观测的 更新：
-        1. 根据 世界模型前一时间步的 状态 和 action，预测 当前时间步的 “先验状态”（先验随机状态、先验确定性状态、状态分布参数）
+        1. 根据 世界模型前一时间步的 状态 和 前5个时间步的action，预测 当前时间步的 “先验状态”（先验随机状态、先验确定性状态、状态分布参数）
         2. 结合 先验确定性状态 + 世界观测编码特征 更新 当前时间步的 “后验状态”（后验随机状态、先验确定性状态、状态分布参数'）
 
         Args:
@@ -253,7 +253,7 @@ class RSSM(nn.Module):
                 - stoch: 随机状态 (num_envs, 32, 32)
                 - deter: 确定性状态 (num_envs, 512)
                 - logit: 状态分布参数 (num_envs, 32, 32)
-            prev_action (tensor): 前一时间步的 action (num_envs, 5*12)
+            prev_action (tensor): 前5个时间步的 action (num_envs, 5*12)
             embed (tensor): 世界模型编码特征 (num_envs, 5120)
             is_first (tensor): 是否为 episode 的第一帧 (num_envs,)
             sample (bool): 是否从分布中采样状态，False则取分布众数
@@ -282,14 +282,14 @@ class RSSM(nn.Module):
                     val * (1.0 - is_first_r) + init_state[key] * is_first_r
                 )
 
-        # 2. 通过 世界模型的前一时间步的 状态 和 action 预测 先验状态（当前时间步的 随机状态、确定性状态、logit）
+        # 2. 通过 世界模型的前一时间步的 状态 和 action历史 预测 先验状态（当前时间步的 随机状态、确定性状态、logit）
         prior = self.img_step(prev_state, prev_action)
 
         # 3. 结合 先验确定性状态 + 观测编码特征 更新 后验随机性状态
         x = torch.cat([prior["deter"], embed], -1)  # (num_envs, 512+5120)
-        # 经观测输出层处理
+        # 经 观测输出层处理
         x = self._obs_out_layers(x)  # (num_envs, 512)
-        # 获取状态分布 logit
+        # 获取 状态分布 logit
         stats = self._suff_stats_layer("obs", x)  # {"logit": (num_envs, 32, 32)}
         if sample:
             stoch = self.get_dist(stats).sample()
@@ -302,23 +302,30 @@ class RSSM(nn.Module):
 
     def img_step(self, prev_state, prev_action, sample=True):
         """
-        根据 前一时间步的 状态 和 action 预测 先验状态（下一时间步的 随机状态、确定性状态、其他统计量）
+        根据 前一时间步的 状态 和 action历史 预测 先验状态（下一时间步的 随机状态、确定性状态、其他统计量）
+
+        Args:
+            prev_state (dict): 世界模型前一时间步潜在状态，包含:
+                - stoch: 随机状态 (num_envs, 32, 32)
+                - deter: 确定性状态 (num_envs, 512)
+                - logit: 状态分布参数 (num_envs, 32, 32)
+            prev_action (tensor): 前5个时间步的 action (num_envs, 5*12)
         """
         prev_stoch = prev_state["stoch"]  # (num_envs, 32, 32)
         if self._discrete:  # 离散模式
             shape = list(prev_stoch.shape[:-2]) + [self._stoch * self._discrete]  # (num_envs, 32*32)
-            prev_stoch = prev_stoch.reshape(shape)  # (num_envs, stoch, discrete_num) -> (num_envs, stoch * discrete_num)
+            prev_stoch = prev_stoch.reshape(shape)  # (num_envs, stoch, discrete_num) ==> (num_envs, stoch * discrete_num)
 
         x = torch.cat([prev_stoch, prev_action], -1) # (num_envs, 32*32 + 5*12)
 
-        # 经输入层处理（输入 前一时间步的随机状态 + 前一时间步的action）
+        # 经输入层处理（输入 前一时间步的随机状态 + 前5个时间步的action）
         x = self._img_in_layers(x)  # (num_envs, 512)
 
-        # 经 循环网络（GRU单元）处理（输入 隐藏特征 + 前一时间步的确定性状态）
+        # 经 循环网络（GRU单元）处理（输入 输入层编码特征 + 前一时间步的确定性状态）
         for _ in range(self._rec_depth):  # rec depth is not correctly implemented
             deter = prev_state["deter"]  # (num_envs, 512)
             # (num_envs, hidden), (num_envs, deter) -> (num_envs, deter), (num_envs, deter)
-            x, deter = self._cell(x, [deter])  # 经GRU单元更新后的 隐藏特征 x 和  确定性状态 deter
+            x, deter = self._cell(x, [deter])  # 经GRU单元更新后的 输入层编码特征 x 和  确定性状态 deter
             deter = deter[0]  # Keras wraps the state in a list.
 
         # 经输出层处理
@@ -326,7 +333,7 @@ class RSSM(nn.Module):
 
         # 获取 状态分布 logit
         stats = self._suff_stats_layer("ims", x)  # {"logit": (num_envs, 32, 32)}
-        # 从 状态分布中 获取 随即状态
+        # 从 状态分布中 获取 随机状态
         if sample:  # 采样
             stoch = self.get_dist(stats).sample()
         else:  # 众数
@@ -975,7 +982,16 @@ class GRUCell(nn.Module):
 
 
 class Conv2dSamePad(torch.nn.Conv2d):
-    def calc_same_pad(self, i, k, s, d):
+    def calc_same_pad(self, i: int, k: int, s: int, d: int) -> int:
+        """计算保持输入输出尺寸相同的padding值
+        Args:
+            i: 输入尺寸(高度或宽度)
+            k: 卷积核尺寸
+            s: 步长
+            d: 膨胀率
+        Returns:
+            计算出的padding值
+        """
         return max((math.ceil(i / s) - 1) * s + (k - 1) * d + 1 - i, 0)
 
     def forward(self, x):

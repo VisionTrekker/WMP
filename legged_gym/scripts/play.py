@@ -110,16 +110,19 @@ def play(args):
     env_cfg.depth.use_camera = True
 
     # prepare environment
-    env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)  # 创建环境
     _, _ = env.reset()
-    obs = env.get_observations()
+    obs = env.get_observations()  # 获取初始观测
+
     # load policy
     train_cfg.runner.resume = True
     train_cfg.runner.load_run = 'WMP'
-
-
     train_cfg.runner.checkpoint = -1
     ppo_runner, train_cfg = task_registry.make_wmp_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
+
+    # 获得推理模式下的 policy：
+    #   (1) 调整 actor_critic 处于eval模式
+    #   (2) 返回 actor_critic.act_inference()
     policy = ppo_runner.get_inference_policy(device=env.device)
     
     # export policy as a jit module (used to run it from C++)

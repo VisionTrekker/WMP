@@ -304,7 +304,7 @@ class WMPRunner:
                         wm_embed = self._world_model.encoder(wm_obs)  # 世界模型观测 编码特征 (num_envs, 5120)
 
                         # 世界模型 潜在状态更新：
-                        #   输入： 前一时间步状态 + 前一时间步action + 世界模型观测特征，
+                        #   输入： 前一时间步状态 + 前5个时间步action + 世界模型观测特征，
                         #   输出： 当前时间步状态（后验随机状态、先验确定性状态、状态分布参数）
                         #   wm_latent结构： {"stoch": (num_envs, 32, 32), "deter": (num_envs, 512), "logit": (num_envs, 32, 32)}
                         wm_latent, _ = self._world_model.dynamics.obs_step(wm_latent, wm_action, wm_embed, wm_obs["is_first"])

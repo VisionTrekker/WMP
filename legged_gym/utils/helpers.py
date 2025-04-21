@@ -196,10 +196,63 @@ def export_policy_as_jit(actor_critic, path):
         exporter.export(path)
     else: 
         os.makedirs(path, exist_ok=True)
-        path = os.path.join(path, 'policy_1.pt')
+        path = os.path.join(path, 'policy.jit')
         model = copy.deepcopy(actor_critic.actor).to('cpu')
         traced_script_module = torch.jit.script(model)
         traced_script_module.save(path)
+
+def export_wm_as_jit(world_model, path):
+    """导出世界模型为JIT格式
+        Args:
+            world_model: 要导出的世界模型
+            path: 导出路径
+        """
+    os.makedirs(path, exist_ok=True)
+
+    # 创建世界模型导出器
+    class WorldModelWrapper(torch.nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.encoder = copy.deepcopy(model.encoder)
+            self.dynamics = copy.deepcopy(model.dynamics)
+
+        def forward(self, obs_dict, prev_stoch=None, prev_deter=None):
+            if not isinstance(obs_dict, dict):
+                raise ValueError("Input must be a dictionary")
+
+            if "image" in obs_dict and obs_dict["image"] is not None:
+                image = obs_dict["image"]
+            else:
+                image = None
+
+            prop = obs_dict["prop"]
+            is_first = obs_dict["is_first"]
+
+            encoder_input = {
+                "prop": prop.to("cuda"),
+                "is_first": is_first.to("cuda"),
+            }
+            if image is not None:
+                encoder_input["image"] = image.to("cuda")
+
+            embed = self.encoder(encoder_input)
+            latent, _ = self.dynamics.obs_step(None, None, embed, obs_dict["is_first"])
+            return self.dynamics.get_deter_feat(latent)
+
+    wrapped_model = WorldModelWrapper(world_model)
+    wrapped_model.eval()
+
+    dummy_input = {
+        "prop": torch.randn(1, world_model.encoder.mlp_shapes["prop"][0]),
+        "is_first": torch.ones(1),
+    }
+    if "image" in world_model.encoder.cnn_shapes:
+        dummy_input["image"] = torch.randn(1, *world_model.encoder.cnn_shapes["image"])
+
+    traced_model = torch.jit.trace(wrapped_model, (dummy_input,))
+    model_path = os.path.join(path, 'world_model_1.jit')
+    traced_model.save(model_path)
+
 
 class PolicyExporterLSTM(torch.nn.Module):
     def __init__(self, actor_critic):

@@ -471,9 +471,17 @@ class MultiEncoder(nn.Module):
         outputs = []
         if self.cnn_shapes:
             if(self.use_camera):  # 使用深度相机，则输入为 深度图 (num_envs, 64, 64, 1), 输出 (num_envs, 4096)
+                # print(f"[networks] multiencoder use_camera: {self.use_camera}")
                 inputs = torch.cat([obs[k] for k in self.cnn_shapes], -1)
+                # 因在JIT模式下，PyTorch不支持使用字符串作为张量的索引，因此修改为使用数字索引
+                # cnn_inputs = []
+                # for i, (key, shape) in enumerate(self.cnn_shapes.items()):
+                #     cnn_inputs.append(obs[i])
+                # inputs = torch.cat(cnn_inputs, -1)
+
                 outputs.append(self._cnn(inputs))
             else:  # 不使用深度图，则输出为 0 tensor (num_envs, 4096)
+                # jit: outputs.append(torch.zeros((obs[0].shape[0], self._cnn.outdim), device=obs[0].device))
                 outputs.append(torch.zeros((obs["is_first"].shape + (self._cnn.outdim,)), device=obs["is_first"].device))
         if self.mlp_shapes: # (num_envs, 33) ==> (num_envs, 1024)
             inputs = torch.cat([obs[k] for k in self.mlp_shapes], -1)
@@ -628,6 +636,10 @@ class ConvEncoder(nn.Module):
         obs -= 0.5  # 归一化到 [-0.5, 0.5]
         # (batch, time, h, w, ch) -> (batch * time, h, w, ch)   ==> (batch * time, 64, 64, 1)
         x = obs.reshape((-1,) + tuple(obs.shape[-3:]))
+        # jit: batch_time = obs.size(0) * obs.size(1) if len(obs.shape) > 4 else obs.size(0)
+        # h, w, ch = obs.shape[-3], obs.shape[-2], obs.shape[-1]
+        # x = obs.reshape(batch_time, h, w, ch)
+
         # (batch * time, h, w, ch) -> (batch * time, ch, h, w)  ==> (batch * time, 1, 64, 64)
         x = x.permute(0, 3, 1, 2)
         # print('init encoder shape:', x.shape)
@@ -637,6 +649,7 @@ class ConvEncoder(nn.Module):
         x = self.layers(x)  # (batch * time, ch, h, w)  ==> (batch * time, 256, 4, 4)
         # (batch * time, ...) -> (batch * time, -1)     ==> (batch * time, 256 * 4 * 4)
         x = x.reshape([x.shape[0], np.prod(x.shape[1:])])
+        # jit: x = x.reshape(batch_time, -1)
         # (batch * time, -1) -> (batch, time, -1)       ==> (batch, time, 256 * 4 * 4)
         return x.reshape(list(obs.shape[:-3]) + [x.shape[-1]])
 

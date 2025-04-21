@@ -42,7 +42,7 @@ from legged_gym import LEGGED_GYM_ROOT_DIR
 
 import isaacgym
 from legged_gym.envs import *
-from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Logger
+from legged_gym.utils import  get_args, export_policy_as_jit, export_wm_as_jit, task_registry, Logger
 
 import numpy as np
 import torch
@@ -127,6 +127,12 @@ def play(args):
         path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'policies')
         export_policy_as_jit(ppo_runner.alg.actor_critic, path)
         print('Exported policy as jit script to: ', path)
+
+    # export wmp as a jit module
+    if EXPORT_WM:
+        path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'wmp')
+        export_wm_as_jit(ppo_runner._world_model, path)
+        print('Exported world model as jit script to: ', path)
 
     logger = Logger(env.dt)
     robot_index = 0 # which robot is used for logging
@@ -250,6 +256,7 @@ def play(args):
 
 if __name__ == '__main__':
     EXPORT_POLICY = True
+    EXPORT_WM = True
     RECORD_FRAMES = False
     MOVE_CAMERA = True
     args = get_args()

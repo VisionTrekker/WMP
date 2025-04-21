@@ -51,7 +51,7 @@ class RSSM(nn.Module):
         min_std=0.1,
         unimix_ratio=0.01,
         initial="learned",
-        num_actions=None,   # 动作空间维度，12
+        num_actions=None,   # action历史 维度，5*12
         embed=None,     # 编码器输出维度，5120
         device=None,
     ):
@@ -71,13 +71,13 @@ class RSSM(nn.Module):
         self._embed = embed
         self._device = device
 
-        # 1. _img_in_layers: Linear(1036 -> 512) --> LayerNorm --> SiLU
+        # 1. _img_in_layers: Linear(1084 -> 512) --> LayerNorm --> SiLU
         inp_layers = []
-        if self._discrete:  # 离散情况: 32 * 32 + 12 = 1036
+        if self._discrete:  # 离散情况: 32 * 32 + 5*12 = 1084
             inp_dim = self._stoch * self._discrete + num_actions
-        else:    # 连续情况: 32 + 12 = 44
+        else:    # 连续情况: 32 + 5*12 = 82
             inp_dim = self._stoch + num_actions
-        inp_layers.append(nn.Linear(inp_dim, self._hidden, bias=False)) # (1036, 512)
+        inp_layers.append(nn.Linear(inp_dim, self._hidden, bias=False)) # (1084, 512)
         if norm:
             inp_layers.append(nn.LayerNorm(self._hidden, eps=1e-03))
         inp_layers.append(act())
@@ -253,7 +253,7 @@ class RSSM(nn.Module):
                 - stoch: 随机状态 (num_envs, 32, 32)
                 - deter: 确定性状态 (num_envs, 512)
                 - logit: 状态分布参数 (num_envs, 32, 32)
-            prev_action (tensor): 前一时间步的 action (num_envs, 12)
+            prev_action (tensor): 前一时间步的 action (num_envs, 5*12)
             embed (tensor): 世界模型编码特征 (num_envs, 5120)
             is_first (tensor): 是否为 episode 的第一帧 (num_envs,)
             sample (bool): 是否从分布中采样状态，False则取分布众数
@@ -309,7 +309,7 @@ class RSSM(nn.Module):
             shape = list(prev_stoch.shape[:-2]) + [self._stoch * self._discrete]  # (num_envs, 32*32)
             prev_stoch = prev_stoch.reshape(shape)  # (num_envs, stoch, discrete_num) -> (num_envs, stoch * discrete_num)
 
-        x = torch.cat([prev_stoch, prev_action], -1) # (num_envs, 32*32+12)
+        x = torch.cat([prev_stoch, prev_action], -1) # (num_envs, 32*32 + 5*12)
 
         # 经输入层处理（输入 前一时间步的随机状态 + 前一时间步的action）
         x = self._img_in_layers(x)  # (num_envs, 512)

@@ -57,7 +57,7 @@ class WorldModel(nn.Module):
             config.dyn_min_std, # 0.1
             config.unimix_ratio,    # 0.01
             config.initial,     # 'learned'
-            config.num_actions, # 12
+            config.num_actions, # action历史维度 5*12
             self.embed_size,    # 5120
             config.device,
         )

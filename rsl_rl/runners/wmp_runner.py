@@ -263,7 +263,7 @@ class WMPRunner:
         # 10. 初始化 世界模型输入
         sum_wm_dataset_size = 0       # 世界模型 数据集大小
         wm_latent = None  # 世界模型 潜在状态，{"stoch": (num_envs, 32, 32), "deter": (num_envs, 512), "logit": (num_envs, 32, 32)}
-        wm_action = None
+        wm_action = None  # 世界模型 action历史 (num_envs, 5*12)
         # prev_state (dict): 世界模型前一时间步潜在状态，
         wm_is_first = torch.ones(self.env.num_envs, device=self._world_model.device)  # 标记是否为 episode 开始 (num_envs,)
 

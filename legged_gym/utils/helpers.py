@@ -194,12 +194,37 @@ def export_policy_as_jit(actor_critic, path):
         # assumes LSTM: TODO add GRU
         exporter = PolicyExporterLSTM(actor_critic)
         exporter.export(path)
-    else: 
-        os.makedirs(path, exist_ok=True)
-        path = os.path.join(path, 'policy.jit')
-        model = copy.deepcopy(actor_critic.actor).to('cpu')
-        traced_script_module = torch.jit.script(model)
-        traced_script_module.save(path)
+    else:
+        # 创建actor_critic导出器
+        class ActorWrapper(torch.nn.Module):
+            def __init__(self, model):
+                super().__init__()
+                self.history_encoder = copy.deepcopy(model.history_encoder)
+                self.wm_feature_encoder = copy.deepcopy(model.wm_feature_encoder)
+                self.actor = copy.deepcopy(model.actor)
+
+            def forward(self, observations, history, wm_feature):
+                """ 推理模式下的 action （直接返回 actor 的输出）"""
+                latent_vector = self.history_encoder(history)
+                wm_latent_vector = self.wm_feature_encoder(wm_feature)
+
+                command = observations[:, 53 + 6:53 + 9]
+                concat_observations = torch.concat((latent_vector, command, wm_latent_vector),
+                                                   dim=-1)
+                actions_mean = self.actor(concat_observations)
+                return actions_mean
+
+        wrapped_actor = ActorWrapper(actor_critic)
+        wrapped_actor.eval()
+
+        obs = torch.randn((1, 285), device="cuda:0")
+        history = torch.randn((1, 5*42), device="cuda:0")
+        wm_feature = torch.randn((1, 512), device="cuda:0")
+
+        traced_model = torch.jit.trace(wrapped_actor, (obs,history,wm_feature))
+        model_path = os.path.join(path, 'policy.jit')
+        traced_model.save(model_path)
+
 
 def export_wm_as_jit(world_model, path):
     """导出世界模型为JIT格式
@@ -243,14 +268,14 @@ def export_wm_as_jit(world_model, path):
     wrapped_model.eval()
 
     dummy_input = {
-        "prop": torch.randn(1, world_model.encoder.mlp_shapes["prop"][0]),
-        "is_first": torch.ones(1),
+        "prop": torch.randn((1, world_model.encoder.mlp_shapes["prop"][0]), device="cuda:0"),
+        "is_first": torch.ones(1, device="cuda:0"),
     }
     if "image" in world_model.encoder.cnn_shapes:
-        dummy_input["image"] = torch.randn(1, *world_model.encoder.cnn_shapes["image"])
+        dummy_input["image"] = torch.randn((1, *world_model.encoder.cnn_shapes["image"]), device="cuda:0")
 
     traced_model = torch.jit.trace(wrapped_model, (dummy_input,))
-    model_path = os.path.join(path, 'world_model_1.jit')
+    model_path = os.path.join(path, 'world_model.jit')
     traced_model.save(model_path)
 
 

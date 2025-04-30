@@ -51,9 +51,9 @@ import torch
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 10)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
     env_cfg.terrain.num_cols = 1
-    env_cfg.terrain.curriculum = False
+    env_cfg.terrain.curriculum = True
     env_cfg.noise.add_noise = False
     # env_cfg.domain_rand.randomize_friction = False
     # env_cfg.domain_rand.randomize_restitution = False
@@ -78,6 +78,7 @@ def play(args):
 
     env_cfg.domain_rand.stiffness_multiplier_range = [1.0, 1.0]
     env_cfg.domain_rand.damping_multiplier_range = [1.0, 1.0]
+    env_cfg.env.episode_length_s = 1000
 
 
     # env_cfg.terrain.mesh_type = 'plane'
@@ -98,12 +99,12 @@ def play(args):
         'crawl': [0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0],
      }[args.terrain]
 
-    env_cfg.commands.ranges.lin_vel_x = [0.6, 0.6]
+    env_cfg.commands.ranges.lin_vel_x = [0.8, 0.8]
     env_cfg.commands.ranges.lin_vel_y = [-0.0, -0.0]
     env_cfg.commands.ranges.ang_vel_yaw = [0.0, 0.0]
     env_cfg.commands.ranges.heading = [0, 0]
 
-    env_cfg.commands.ranges.flat_lin_vel_x = [0.6, 0.6]
+    env_cfg.commands.ranges.flat_lin_vel_x = [0.8, 0.8]
     env_cfg.commands.ranges.flat_lin_vel_y = [-0.0, -0.0]
     env_cfg.commands.ranges.flat_ang_vel_yaw = [0.0, 0.0]
 
@@ -176,7 +177,8 @@ def play(args):
     for i in range(1*int(env.max_episode_length) + 3):
         if (env.global_counter % wm_update_interval == 0):
             if (env.cfg.depth.use_camera):
-                wm_obs["image"][env.depth_index] = infos["depth"].unsqueeze(-1).to(world_model.device)
+                wm_obs["image"][env.depth_index] = infos["depth"].unsqueeze(-1).to(world_model.device)  # [1, 64, 64, 1]
+                # wm_obs["image"][env.depth_index] = (torch.ones((1, 64, 64, 1)) * 0.5).to(world_model.device)  # [1, 64, 64, 1]
 
             wm_embed = world_model.encoder(wm_obs)
             wm_latent, _ = world_model.dynamics.obs_step(wm_latent, wm_action, wm_embed, wm_obs["is_first"], sample=True)
@@ -185,6 +187,7 @@ def play(args):
 
         history = trajectory_history.flatten(1).to(env.device)
         actions = policy(obs.detach(), history.detach(), wm_feature.detach())
+        print("actions: ", actions.detach().cpu().numpy())
 
 
         obs, _, rews, dones, infos, reset_env_ids, _ = env.step(actions.detach())
@@ -226,8 +229,9 @@ def play(args):
                 env.gym.write_viewer_image_to_file(env.viewer, filename)
                 img_idx += 1 
         if MOVE_CAMERA:
-            lootat = env.root_states[8, :3]
-            camara_position = lootat.detach().cpu().numpy() + [0, 1, 0]
+            lootat = env.root_states[0, :3]
+            # camara_position = lootat.detach().cpu().numpy() + [0, 2, 0.5] # gap
+            camara_position = lootat.detach().cpu().numpy() + [-3, 0, 1]    # tilt
             env.set_camera(camara_position, lootat)
 
         if i < stop_state_log:

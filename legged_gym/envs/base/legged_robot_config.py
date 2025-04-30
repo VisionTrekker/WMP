@@ -161,9 +161,13 @@ class LeggedRobotCfg(BaseConfig):
         randomize_com_pos = True
         com_pos_range = [-0.05, 0.05]
 
-        push_robots = True
+        push_robots = True  # 是否给 机器人的base 在x/y线速度方向上添加随机推力 (瞬时的)
         push_interval_s = 15
-        max_push_vel_xy = 1.0
+        max_push_vel_xy = 1.0  # [m/s]
+
+        disturbance = True  # 是否给 机器人的base 添加随机扰动 (持续的)
+        disturbance_range = [-30.0, 30.0]  # N
+        disturbance_interval = 8
 
         randomize_gains = True
         stiffness_multiplier_range = [0.9, 1.1]

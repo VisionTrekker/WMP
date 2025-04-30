@@ -379,6 +379,7 @@ class LeggedRobot(BaseTask):
         self.compute_observations()
 
         # 10. 更新上一control步的 actions、关节位置、关节速度、扭矩、base的线速度和角速度
+        self.disturbance[:, :, :] = 0.0
         self.last_last_actions[:] = self.last_actions[:]
         self.last_actions[:] = self.actions[:]
         self.last_dof_pos[:] = self.dof_pos[:]
@@ -750,6 +751,8 @@ class LeggedRobot(BaseTask):
             self.measured_forward_heights = self._get_forward_heights()
         if self.cfg.domain_rand.push_robots and  (self.common_step_counter % self.cfg.domain_rand.push_interval == 0):
             self._push_robots()
+        # if self.cfg.domain_rand.disturbance and (self.common_step_counter % self.cfg.domain_rand.disturbance_interval == 0):
+        #     self._disturbance_robots()
 
     def _resample_commands(self, env_ids):
         """ Randommly select commands of some environments
@@ -929,11 +932,20 @@ class LeggedRobot(BaseTask):
                                                      gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
 
     def _push_robots(self):
-        """ Random pushes the robots. Emulates an impulse by setting a randomized base velocity.
+        """ Random pushes the robots. Emulates an impulse by setting a randomized base velocity. (瞬时的)
         """
-        max_vel = self.cfg.domain_rand.max_push_vel_xy
+        max_vel = self.cfg.domain_rand.max_push_vel_xy  # 获取最大推力线速度 [1m/s]
+        # 给 base 在x/y线速度方向上添加随机推力
         self.root_states[:, 7:9] = torch_rand_float(-max_vel, max_vel, (self.num_envs, 2), device=self.device) # lin vel x/y
         self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
+
+    def _disturbance_robots(self):
+        """ Random add disturbance force to the robots. (持续的)
+        """
+        # [-30, 30] N
+        disturbance = torch_rand_float(self.cfg.domain_rand.disturbance_range[0], self.cfg.domain_rand.disturbance_range[1], (self.num_envs, 3), device=self.device)
+        self.disturbance[:, 0, :] = disturbance  # 给 base 添加随机扰动
+        self.gym.apply_rigid_body_force_tensors(self.sim, forceTensor=gymtorch.unwrap_tensor(self.disturbance), space=gymapi.CoordinateSpace.LOCAL_SPACE)
 
 
     def update_reward_curriculum(self, current_iter):
@@ -1135,6 +1147,8 @@ class LeggedRobot(BaseTask):
                                             self.cfg.depth.buffer_len,
                                             self.cfg.depth.resized[0],
                                             self.cfg.depth.resized[1]).to(self.device)
+
+        self.disturbance = torch.zeros(self.num_envs, self.num_bodies, 3, dtype=torch.float, device=self.device, requires_grad=False)  # (num_evns, 17, 3)
 
     def compute_randomized_gains(self, num_envs):
         # (num_envs, 12) 的 0.8 - 1.2 的随机数

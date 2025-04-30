@@ -433,7 +433,7 @@ class WMPRunner:
                 start = stop
                 self.alg.compute_returns(critic_obs, wm_feature.to(self.env.device))
 
-            # 16. 执行 Policy更新
+            # 16. 执行 Policy更新: 计算loss
             mean_value_loss, mean_surrogate_loss, mean_vel_predict_loss, mean_amp_loss, mean_grad_pen_loss, mean_policy_pred, mean_expert_pred = self.alg.update()
 
             stop = time.time()
